@@ -55,7 +55,7 @@ def test_tooling_stage_writes_tools_json_and_partial_when_tools_missing(
         "unsquashfs",
         "docker",
     ]
-    assert out.details.get("missing_optional_tools") == ["lzop", "ubidump"]
+    assert out.details.get("missing_optional_tools") == ["lzop", "ubidump", "checksec", "readelf", "file", "nm"]
 
     tools_path = ctx.run_dir / "stages" / "tooling" / "tools.json"
     assert tools_path.is_file()
@@ -247,8 +247,8 @@ def test_tooling_stage_optional_missing_keeps_status_ok(
     out = ToolingStage(timeout_s=0.1, max_output_chars=64).run(ctx)
     assert out.status == "ok"
     assert out.details.get("missing_required_tools") == []
-    assert out.details.get("missing_optional_tools") == ["lzop", "ubidump"]
-    assert out.details.get("missing_tools") == ["lzop", "ubidump"]
+    assert out.details.get("missing_optional_tools") == ["lzop", "ubidump", "checksec", "readelf", "file", "nm"]
+    assert out.details.get("missing_tools") == ["lzop", "ubidump", "checksec", "readelf", "file", "nm"]
 
 
 def test_tooling_stage_tools_json_sanitizes_absolute_paths(

@@ -2207,6 +2207,36 @@ def _priority_cmd_exec_findings(
     )
 
 
+def _hardening_score_multiplier(hardening_summary: dict[str, object] | None) -> float:
+    """Return a score multiplier based on firmware-wide hardening posture.
+
+    - All protections high (NX+PIE+full RELRO+canary all >=80%): 0.7
+    - No protections (all <=10%): 1.15
+    - Otherwise: interpolate based on count of weak attributes.
+    """
+    if hardening_summary is None:
+        return 1.0
+    elf_total = hardening_summary.get("elf_total")
+    if not isinstance(elf_total, (int, float)) or elf_total <= 0:
+        return 1.0
+
+    nx_pct = float(hardening_summary.get("nx_pct", 0) or 0)
+    pie_pct = float(hardening_summary.get("pie_pct", 0) or 0)
+    relro_pct = float(hardening_summary.get("relro_full_pct", 0) or 0)
+    canary_pct = float(hardening_summary.get("canary_pct", 0) or 0)
+
+    pcts = [nx_pct, pie_pct, relro_pct, canary_pct]
+    # Count how many protections are weak (<=20%)
+    weak_count = sum(1 for p in pcts if p <= 20.0)
+
+    if weak_count == 0 and all(p >= 80.0 for p in pcts):
+        return 0.7
+    if weak_count == 4 and all(p <= 10.0 for p in pcts):
+        return 1.15
+    # Linear interpolation: 0 weak → 0.7, 4 weak → 1.15
+    return round(0.7 + (weak_count / 4.0) * 0.45, 4)
+
+
 def _build_exploit_candidates_payload(
     *,
     firmware_id: str,
@@ -2216,6 +2246,7 @@ def _build_exploit_candidates_payload(
     ssh_password_auth_evidence: list[dict[str, JsonValue]],
     ssh_root_login_evidence: list[dict[str, JsonValue]],
     ssh_empty_passwords_evidence: list[dict[str, JsonValue]],
+    hardening_summary: dict[str, object] | None = None,
 ) -> dict[str, JsonValue]:
     finding_by_source_id: dict[str, dict[str, JsonValue]] = {}
     for finding in pattern_scan_findings:
@@ -2646,6 +2677,16 @@ def _build_exploit_candidates_payload(
         )
         candidates.append(candidate)
 
+    # Apply hardening-based score adjustment
+    h_mult = _hardening_score_multiplier(hardening_summary)
+    if h_mult != 1.0:
+        for candidate in candidates:
+            raw_score = _as_float(candidate.get("score"))
+            adjusted = round(min(0.97, raw_score * h_mult), 4)
+            candidate["score"] = adjusted
+            candidate["confidence"] = _confidence_from_score(adjusted)
+            candidate["priority"] = _candidate_priority_from_score(adjusted)
+
     candidates = sorted(
         candidates,
         key=lambda item: (
@@ -3064,6 +3105,18 @@ def run_findings(
         candidate_files,
         max_matches=max_matches_per_rule,
     )
+    # Load hardening summary from inventory binary_analysis.json
+    _hardening_summary_obj: dict[str, object] | None = None
+    _ba_path = ctx.run_dir / "stages" / "inventory" / "binary_analysis.json"
+    _ba_any = _safe_load_json(_ba_path)
+    if isinstance(_ba_any, dict):
+        _ba_dict = cast(dict[str, object], _ba_any)
+        _sum_any = _ba_dict.get("summary")
+        if isinstance(_sum_any, dict):
+            _hs_any = cast(dict[str, object], _sum_any).get("hardening_summary")
+            if isinstance(_hs_any, dict):
+                _hardening_summary_obj = cast(dict[str, object], _hs_any)
+
     exploit_candidates_payload = _build_exploit_candidates_payload(
         firmware_id=firmware_id,
         pattern_scan_findings=pattern_scan_findings,
@@ -3074,7 +3127,32 @@ def run_findings(
         ssh_password_auth_evidence=ssh_password_auth_evidence_precomputed,
         ssh_root_login_evidence=ssh_root_login_evidence_precomputed,
         ssh_empty_passwords_evidence=ssh_empty_passwords_evidence_precomputed,
+        hardening_summary=_hardening_summary_obj,
     )
+
+    # --- Terminator feedback scoring calibration ---
+    try:
+        from .terminator_feedback import (
+            load_feedback_registry as _load_fb_registry,
+            apply_scoring_calibration as _apply_fb_calibration,
+        )
+
+        _fb_dir = Path(os.environ.get("AIEDGE_FEEDBACK_DIR", "aiedge-feedback"))
+        _fb_verdicts = _load_fb_registry(_fb_dir)
+        if _fb_verdicts:
+            _raw_candidates_any = exploit_candidates_payload.get("candidates")
+            if isinstance(_raw_candidates_any, list):
+                _raw_candidates = cast(
+                    list[dict[str, JsonValue]],
+                    cast(list[object], _raw_candidates_any),
+                )
+                _calibrated = _apply_fb_calibration(_raw_candidates, _fb_verdicts)
+                exploit_candidates_payload["candidates"] = cast(
+                    JsonValue, cast(list[object], _calibrated)
+                )
+    except Exception:
+        pass  # fail-open: feedback calibration is best-effort
+
     known_disclosures_payload = _known_disclosures_payload(ctx.run_dir, candidate_files)
 
     pattern_scan_path = stage_dir / "pattern_scan.json"

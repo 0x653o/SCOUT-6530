@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -106,10 +107,148 @@ def _format_log(
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Tier helpers
+# ---------------------------------------------------------------------------
+
+
+def _try_tier1(
+    docker_bin: str,
+    emulation_image: str,
+    roots: list[Path],
+    firmware_path: Path | None,
+    *,
+    timeout_s: float,
+    cpus: float | None,
+    memory_mb: int | None,
+    pids_limit: int | None,
+) -> tuple[bool, str, str, str, int]:
+    """Attempt Tier 1: scout-emulation Docker image with FirmAE inside.
+
+    Returns (success, stdout, stderr, reason, returncode).
+    """
+    # Check if the scout-emulation image exists
+    inspect_cmd = [docker_bin, "image", "inspect", emulation_image]
+    try:
+        inspect_res = subprocess.run(
+            inspect_cmd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except Exception:
+        return False, "", "", "tier1: image inspect failed", -1
+
+    if inspect_res.returncode != 0:
+        return False, "", inspect_res.stderr or "", "tier1: image not available", -1
+
+    # Tier 1 runs FirmAE which needs: writable fs, network (QEMU bridge),
+    # privileged caps (kpartx, mount, tunctl).  Security is provided by
+    # container isolation itself + --rm (no persistent state).
+    run_cmd: list[str] = [
+        docker_bin,
+        "run",
+        "--rm",
+        "--privileged",
+        "--pull=never",
+    ]
+    if pids_limit is not None and int(pids_limit) > 0:
+        run_cmd.extend(["--pids-limit", str(int(pids_limit))])
+    if cpus is not None:
+        run_cmd.extend(["--cpus", str(float(cpus))])
+    if memory_mb is not None:
+        run_cmd.extend(["--memory", f"{int(memory_mb)}m"])
+
+    # Mount firmware file if available
+    if firmware_path is not None and firmware_path.is_file():
+        run_cmd.extend(
+            ["-v", f"{str(firmware_path.resolve())}:/mnt/firmware.bin:ro"]
+        )
+
+    # Mount rootfs volumes
+    for i, root in enumerate(roots[:3]):
+        run_cmd.extend(["-v", f"{str(root.resolve())}:/mnt/rootfs{i}:ro"])
+
+    run_cmd.extend([emulation_image, "/mnt/firmware.bin", "auto"])
+
+    try:
+        res = subprocess.run(
+            run_cmd,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_s,
+        )
+        return (
+            res.returncode == 0,
+            res.stdout or "",
+            res.stderr or "",
+            "" if res.returncode == 0 else f"tier1: exit code {res.returncode}",
+            res.returncode,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return (
+            False,
+            (exc.stdout or "") if isinstance(exc.stdout, str) else "",
+            (exc.stderr or "") if isinstance(exc.stderr, str) else "",
+            f"tier1: timed out after {timeout_s}s",
+            -1,
+        )
+    except Exception as exc:
+        return False, "", "", f"tier1: {type(exc).__name__}: {exc}", -1
+
+
+def _try_tier2(roots: list[Path], *, timeout_s: float) -> tuple[bool, str, list[dict[str, JsonValue]]]:
+    """Attempt Tier 2: QEMU user-mode service probes.
+
+    Returns (success, log_text, probe_results_for_details).
+    """
+    from .emulation_qemu import execute_service_probes
+
+    all_results: list[dict[str, JsonValue]] = []
+    log_lines: list[str] = ["=== Tier 2: QEMU user-mode probes ==="]
+    any_success = False
+
+    per_root_timeout = max(timeout_s / max(len(roots), 1), 5.0)
+
+    for root in roots[:3]:
+        results = execute_service_probes(
+            root,
+            timeout_s=per_root_timeout,
+            max_probes=8,
+        )
+        for r in results:
+            probe_entry: dict[str, JsonValue] = {
+                "binary": r.binary,
+                "arch": r.arch,
+                "exit_code": r.exit_code,
+                "timed_out": r.timed_out,
+                "args": cast(JsonValue, r.args),
+                "stdout_snippet": r.stdout[:2000],
+                "stderr_snippet": r.stderr[:2000],
+            }
+            all_results.append(probe_entry)
+            log_lines.append(
+                f"binary={r.binary} arch={r.arch} exit={r.exit_code} "
+                f"timed_out={r.timed_out} args={r.args}"
+            )
+            if r.stdout.strip():
+                log_lines.append(f"  stdout: {r.stdout[:500]}")
+            if r.stderr.strip():
+                log_lines.append(f"  stderr: {r.stderr[:500]}")
+            if r.stdout.strip() or r.stderr.strip():
+                any_success = True
+
+    log_text = "\n".join(log_lines) + "\n"
+    return any_success, log_text, all_results
+
+
 @dataclass(frozen=True)
 class EmulationStage:
     image: str = "alpine:3.23"
+    emulation_image: str = ""  # resolved from env at runtime
     timeout_s: float | None = 30.0
+    tier1_timeout_s: float | None = 480.0  # FirmAE needs minutes to boot
     cpus: float | None = 1.0
     memory_mb: int | None = 256
     pids_limit: int | None = 256
@@ -117,6 +256,11 @@ class EmulationStage:
     @property
     def name(self) -> str:
         return "emulation"
+
+    def _resolve_emulation_image(self) -> str:
+        if self.emulation_image:
+            return self.emulation_image
+        return os.environ.get("AIEDGE_EMULATION_IMAGE", "scout-emulation:latest")
 
     def run(self, ctx: StageContext) -> StageOutcome:
         stage_dir = ctx.run_dir / "stages" / "emulation"
@@ -165,17 +309,100 @@ class EmulationStage:
                 ],
             )
 
+        log_sections: list[str] = []
+        used_tier: str = ""
+
+        # ---------------------------------------------------------------
+        # Tier 1: scout-emulation Docker image (FirmAE inside)
+        # ---------------------------------------------------------------
         docker_bin = shutil.which("docker")
+        if docker_bin:
+            emu_image = self._resolve_emulation_image()
+            firmware_path = ctx.run_dir / "input" / "firmware.bin"
+            t1_ok, t1_stdout, t1_stderr, t1_reason, t1_rc = _try_tier1(
+                docker_bin,
+                emu_image,
+                roots,
+                firmware_path if firmware_path.is_file() else None,
+                timeout_s=float(self.tier1_timeout_s or 480.0),
+                cpus=self.cpus,
+                memory_mb=self.memory_mb,
+                pids_limit=self.pids_limit,
+            )
+            log_sections.append(
+                _format_log(
+                    attempted_cmd=[docker_bin, "run", emu_image, "..."],
+                    stdout=t1_stdout,
+                    stderr=t1_stderr,
+                    reason=t1_reason or None,
+                )
+            )
+            if t1_ok:
+                used_tier = "tier1"
+                _ = log_path.write_text(
+                    "\n".join(log_sections), encoding="utf-8"
+                )
+                return StageOutcome(
+                    status="ok",
+                    details=cast(
+                        dict[str, JsonValue],
+                        {
+                            "reason": "",
+                            "image": emu_image,
+                            "used_tier": used_tier,
+                            "returncode": t1_rc,
+                            "log": _rel_to_run_dir(ctx.run_dir, log_path),
+                            "evidence": evidence,
+                        },
+                    ),
+                    limitations=[],
+                )
+
+        # ---------------------------------------------------------------
+        # Tier 2: QEMU user-mode service probes
+        # ---------------------------------------------------------------
+        t2_ok, t2_log, t2_probes = _try_tier2(
+            roots, timeout_s=float(self.timeout_s or 30.0)
+        )
+        log_sections.append(t2_log)
+
+        if t2_ok:
+            used_tier = "tier2"
+            _ = log_path.write_text(
+                "\n".join(log_sections), encoding="utf-8"
+            )
+            return StageOutcome(
+                status="ok",
+                details=cast(
+                    dict[str, JsonValue],
+                    {
+                        "reason": "",
+                        "used_tier": used_tier,
+                        "qemu_probes": cast(JsonValue, t2_probes),
+                        "log": _rel_to_run_dir(ctx.run_dir, log_path),
+                        "evidence": evidence,
+                    },
+                ),
+                limitations=[],
+            )
+
+        # ---------------------------------------------------------------
+        # Tier 3: rootfs inspection via Alpine Docker (original behavior)
+        # ---------------------------------------------------------------
+        used_tier = "tier3"
+
         if not docker_bin:
             reason = "docker not installed"
-            _ = log_path.write_text(
+            log_sections.append(
                 _format_log(
                     attempted_cmd=None,
                     stdout="",
                     stderr="",
                     reason=reason,
-                ),
-                encoding="utf-8",
+                )
+            )
+            _ = log_path.write_text(
+                "\n".join(log_sections), encoding="utf-8"
             )
             return StageOutcome(
                 status="partial",
@@ -184,6 +411,7 @@ class EmulationStage:
                     {
                         "reason": reason,
                         "image": self.image,
+                        "used_tier": used_tier,
                         "evidence": evidence,
                     },
                 ),
@@ -204,14 +432,16 @@ class EmulationStage:
             inspect_stderr = inspect_res.stderr or ""
         except Exception as e:
             reason = f"docker image inspect failed: {type(e).__name__}: {e}"
-            _ = log_path.write_text(
+            log_sections.append(
                 _format_log(
                     attempted_cmd=inspect_cmd,
                     stdout=inspect_stdout,
                     stderr=inspect_stderr,
                     reason=reason,
-                ),
-                encoding="utf-8",
+                )
+            )
+            _ = log_path.write_text(
+                "\n".join(log_sections), encoding="utf-8"
             )
             return StageOutcome(
                 status="partial",
@@ -220,6 +450,7 @@ class EmulationStage:
                     {
                         "reason": reason,
                         "image": self.image,
+                        "used_tier": used_tier,
                         "evidence": evidence,
                     },
                 ),
@@ -238,14 +469,16 @@ class EmulationStage:
             else:
                 reason = f"required docker image missing: {self.image}"
                 limitations = ["Emulation skipped: required docker image is missing."]
-            _ = log_path.write_text(
+            log_sections.append(
                 _format_log(
                     attempted_cmd=inspect_cmd,
                     stdout=inspect_stdout,
                     stderr=inspect_stderr,
                     reason=reason,
-                ),
-                encoding="utf-8",
+                )
+            )
+            _ = log_path.write_text(
+                "\n".join(log_sections), encoding="utf-8"
             )
             return StageOutcome(
                 status="partial",
@@ -254,6 +487,7 @@ class EmulationStage:
                     {
                         "reason": reason,
                         "image": self.image,
+                        "used_tier": used_tier,
                         "evidence": evidence,
                     },
                 ),
@@ -304,14 +538,16 @@ class EmulationStage:
             stderr = run_res.stderr or ""
         except subprocess.TimeoutExpired as e:
             reason = f"emulation timed out after {self.timeout_s}s"
-            _ = log_path.write_text(
+            log_sections.append(
                 _format_log(
                     attempted_cmd=run_cmd,
                     stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
                     stderr=(e.stderr or "") if isinstance(e.stderr, str) else "",
                     reason=reason,
-                ),
-                encoding="utf-8",
+                )
+            )
+            _ = log_path.write_text(
+                "\n".join(log_sections), encoding="utf-8"
             )
             return StageOutcome(
                 status="partial",
@@ -320,6 +556,7 @@ class EmulationStage:
                     {
                         "reason": reason,
                         "image": self.image,
+                        "used_tier": used_tier,
                         "timeout_s": float(self.timeout_s or 0.0),
                         "evidence": evidence,
                     },
@@ -328,14 +565,16 @@ class EmulationStage:
             )
         except Exception as e:
             reason = f"docker run failed: {type(e).__name__}: {e}"
-            _ = log_path.write_text(
+            log_sections.append(
                 _format_log(
                     attempted_cmd=run_cmd,
                     stdout=stdout,
                     stderr=stderr,
                     reason=reason,
-                ),
-                encoding="utf-8",
+                )
+            )
+            _ = log_path.write_text(
+                "\n".join(log_sections), encoding="utf-8"
             )
             return StageOutcome(
                 status="failed",
@@ -344,6 +583,7 @@ class EmulationStage:
                     {
                         "reason": reason,
                         "image": self.image,
+                        "used_tier": used_tier,
                         "evidence": evidence,
                     },
                 ),
@@ -352,21 +592,23 @@ class EmulationStage:
 
         if run_res.returncode == 0:
             status = "ok"
-            reason: str | None = None
+            reason_final: str | None = None
             limits: list[str] = []
         else:
             status = "partial"
-            reason = f"docker command exited with return code {run_res.returncode}"
+            reason_final = f"docker command exited with return code {run_res.returncode}"
             limits = ["Emulation command failed; review emulation log for details."]
 
-        _ = log_path.write_text(
+        log_sections.append(
             _format_log(
                 attempted_cmd=run_cmd,
                 stdout=stdout,
                 stderr=stderr,
-                reason=reason,
-            ),
-            encoding="utf-8",
+                reason=reason_final,
+            )
+        )
+        _ = log_path.write_text(
+            "\n".join(log_sections), encoding="utf-8"
         )
 
         return StageOutcome(
@@ -374,8 +616,9 @@ class EmulationStage:
             details=cast(
                 dict[str, JsonValue],
                 {
-                    "reason": reason or "",
+                    "reason": reason_final or "",
                     "image": self.image,
+                    "used_tier": used_tier,
                     "returncode": int(run_res.returncode),
                     "log": _rel_to_run_dir(ctx.run_dir, log_path),
                     "evidence": evidence,

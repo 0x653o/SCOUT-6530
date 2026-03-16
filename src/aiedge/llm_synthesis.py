@@ -195,15 +195,7 @@ def _run_codex_chain_builder_exec(
     prompt: str,
     timeout_s: float,
 ) -> dict[str, object]:
-    if not shutil.which("codex"):
-        return {
-            "status": "missing_cli",
-            "stdout": "",
-            "stderr": "codex executable not found",
-            "argv": [],
-            "attempts": [],
-            "returncode": -1,
-        }
+    from .llm_driver import resolve_driver
 
     timeout = _env_float(
         "AIEDGE_LLM_CHAIN_TIMEOUT_S",
@@ -211,129 +203,48 @@ def _run_codex_chain_builder_exec(
         min_value=10.0,
         max_value=300.0,
     )
-    base_argv = [
-        "codex",
-        "exec",
-        "--ephemeral",
-        "-s",
-        "read-only",
-        "-C",
-        str(run_dir),
-    ]
-    argv = base_argv + [prompt]
-    attempts: list[dict[str, object]] = []
-
-    def _exec_once(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-        cp = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-        )
-        attempts.append(
-            {
-                "argv": list(cmd),
-                "returncode": int(cp.returncode),
-                "stdout": _truncate_text(cp.stdout or ""),
-                "stderr": _truncate_text(cp.stderr or ""),
-            }
-        )
-        return cp
-
     max_attempts = _env_int(
         "AIEDGE_LLM_CHAIN_MAX_ATTEMPTS",
         default=max(1, int(_LLM_CHAIN_RETRY_MAX_ATTEMPTS)),
         min_value=1,
         max_value=8,
     )
-    cp: subprocess.CompletedProcess[str] | None = None
-    use_skip_git_repo_check = False
+
+    driver = resolve_driver()
+    result = driver.execute(
+        prompt=prompt,
+        run_dir=run_dir,
+        timeout_s=timeout,
+        max_attempts=max_attempts,
+        retryable_tokens=_LLM_CHAIN_RETRYABLE_STDERR_TOKENS,
+    )
+
+    # Apply site-specific truncation to attempts
+    truncated_attempts: list[dict[str, object]] = []
+    for att in result.attempts:
+        truncated_att = dict(att)
+        if "stdout" in truncated_att and isinstance(truncated_att["stdout"], str):
+            truncated_att["stdout"] = _truncate_text(truncated_att["stdout"])
+        if "stderr" in truncated_att and isinstance(truncated_att["stderr"], str):
+            truncated_att["stderr"] = _truncate_text(truncated_att["stderr"])
+        truncated_attempts.append(truncated_att)
+
+    # Detect site-specific extra fields
+    timeout_seen = result.status == "timeout"
     retryable_error_detected = False
-    timeout_seen = False
-
-    for attempt_idx in range(max_attempts):
-        cmd = (
-            base_argv + ["--skip-git-repo-check", prompt]
-            if use_skip_git_repo_check
-            else list(argv)
-        )
-        try:
-            cp = _exec_once(cmd)
-        except subprocess.TimeoutExpired as exc:
-            timeout_seen = True
-            attempts.append(
-                {
-                    "argv": list(cmd),
-                    "returncode": -1,
-                    "stdout": _truncate_text(
-                        (exc.stdout if isinstance(exc.stdout, str) else "") or ""
-                    ),
-                    "stderr": _truncate_text(
-                        (exc.stderr if isinstance(exc.stderr, str) else "") or ""
-                    ),
-                    "exception": "TimeoutExpired",
-                }
-            )
-            if attempt_idx + 1 < max_attempts:
-                continue
-            return {
-                "status": "timeout",
-                "stdout": _truncate_text(
-                    (exc.stdout if isinstance(exc.stdout, str) else "") or ""
-                ),
-                "stderr": _truncate_text(
-                    (exc.stderr if isinstance(exc.stderr, str) else "") or ""
-                ),
-                "argv": list(cmd),
-                "attempts": attempts,
-                "returncode": -1,
-            }
-        except Exception as exc:
-            return {
-                "status": "error",
-                "stdout": "",
-                "stderr": f"{type(exc).__name__}: {exc}",
-                "argv": list(cmd),
-                "attempts": attempts,
-                "returncode": -1,
-            }
-
-        stderr_lc = (cp.stderr or "").lower()
-        if cp.returncode == 0:
-            break
-
-        if "skip-git-repo-check" in stderr_lc and not use_skip_git_repo_check:
-            use_skip_git_repo_check = True
-            continue
-
+    if result.status == "nonzero_exit":
+        stderr_lc = result.stderr.lower()
         retryable_error_detected = any(
             token in stderr_lc for token in _LLM_CHAIN_RETRYABLE_STDERR_TOKENS
         )
-        if retryable_error_detected:
-            continue
 
-        break
-
-    if cp is None:
-        return {
-            "status": "error",
-            "stdout": "",
-            "stderr": "codex chain-builder execution did not produce a process result",
-            "argv": list(argv),
-            "attempts": attempts,
-            "returncode": -1,
-        }
-
-    status = "ok" if cp.returncode == 0 else "nonzero_exit"
     return {
-        "status": status,
-        "stdout": _truncate_text(cp.stdout or ""),
-        "stderr": _truncate_text(cp.stderr or ""),
-        "argv": list(attempts[-1]["argv"]) if attempts else list(argv),
-        "attempts": attempts,
-        "returncode": int(cp.returncode),
+        "status": result.status,
+        "stdout": _truncate_text(result.stdout),
+        "stderr": _truncate_text(result.stderr),
+        "argv": list(result.argv),
+        "attempts": truncated_attempts,
+        "returncode": result.returncode,
         "retryable_error_detected": bool(retryable_error_detected),
         "timeout_seen": bool(timeout_seen),
     }

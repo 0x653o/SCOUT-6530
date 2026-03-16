@@ -36,18 +36,27 @@ SCOUT는 펌웨어 분석 결과를 "가능한 취약점 목록"에서 멈추지
 
 ## 최근 동기화 포인트
 
-- `analyze` / `analyze-8mb`에 `--rootfs <DIR>`가 추가되었습니다.  
+- **바이너리 하드닝 분석** — 순수 Python ELF 파서로 NX, PIE, RELRO, Stack Canary, Stripped 상태를 바이너리별로 수집. `inventory/binary_analysis.json`에 `hardening_summary` 포함. findings 점수에 하드닝 기반 보정 적용 (fully hardened: x0.7, no protection: x1.15).
+- **3-Tier 에뮬레이션** — Tier 1: FirmAE 시스템 에뮬레이션(Docker 컨테이너, sudo 불필요), Tier 2: QEMU user-mode 서비스 프로빙(lighttpd, busybox, dnsmasq, sshd 등), Tier 3: rootfs 검사(Alpine Docker fallback). `AIEDGE_EMULATION_IMAGE`, `AIEDGE_FIRMAE_ROOT` env var로 설정.
+- **엔디안 인식 아키텍처 감지** — MIPS/ARM 빅/리틀엔디안 정확 구분: `mips_be`, `mips_le`, `arm_be`, `arm_le`.
+- **LLM Provider 추상화** — `llm_driver.py`의 `LLMDriver` Protocol과 `CodexCLIDriver`. 3개 호출사이트(llm_synthesis, exploit_autopoc, llm_codex) 통합. `AIEDGE_LLM_DRIVER` env var로 provider 선택, `ModelTier` ("haiku"|"sonnet"|"opus") 지원.
+- **취약점 유형별 PoC 템플릿** — `poc_templates.py` 레지스트리: `cmd_injection`, `path_traversal`, `auth_bypass`, `info_disclosure` 4종 + `tcp_banner` fallback. `poc_skeletons/` 디렉토리에 standalone 파일.
+- **exploit_runner 실제 PCAP 캡처** — tcpdump 가용 시 실제 패킷 캡처 (기존 placeholder fallback 유지).
+- **PoC 재현성 검증** — `poc_validation`에서 readback_hash 일관성 확인으로 재현성 보장.
+- **LLM 보조 트리아지 스테이지** (`llm_triage`) — findings → llm_synthesis 사이에 실행. 모델 티어 자동 선택: <10 후보 → haiku, 10–50 → sonnet, >50 → opus. 하드닝/attack_surface 보안 컨텍스트 포함. `--no-llm`에서 graceful skip.
+- **Terminator 양방향 피드백 루프** — `terminator_feedback.py`가 `firmware_handoff.json`에 `feedback_request` 섹션 추가. Terminator 판정(confirmed boost, false_positive suppress)이 `duplicate_gate`에 반영. `AIEDGE_FEEDBACK_DIR` env var.
+- `analyze` / `analyze-8mb`에 `--rootfs <DIR>`가 추가되었습니다.
   다층 패킹 펌웨어에서 추출 실패 시, 수동/사전 추출 rootfs를 바로 주입할 수 있습니다.
 - extraction stage에 품질 게이트가 추가되어 파일 수가 너무 적으면 `partial` + 경고로 표시됩니다.
 - inventory 산출물이 확장되었습니다.
-  - `stages/inventory/binary_analysis.json`
+  - `stages/inventory/binary_analysis.json` (+ 바이너리별 하드닝 데이터)
   - `inventory.json.quality`
   - `inventory.json.binary_analysis_summary`
 - `firmware_profile`은 ELF 교차검증(`arch_guess`, `elf_hints`)을 포함해 RTOS 오탐을 줄입니다.
 - `firmware_handoff.json`이 SCOUT에서 자동 생성됩니다(분석/재실행 모두).
 - `./scout` 래퍼가 우선 사용되며, 긴 `PYTHONPATH=... python3 -m aiedge` 호출은 보조 수단입니다.
 - `dynamic_validation`과 `exploit_autopoc`가 **증거 번들(evidence bundle)**을 통해 연결되어, 실시간으로 D/E/V 우선순위 판독이 가능해졌습니다.
-- 런타임 통신 모델이 별도 stage로 산출됩니다.  
+- 런타임 통신 모델이 별도 stage로 산출됩니다.
   - `stages/graph/communication_graph.json`
   - `stages/graph/communication_matrix.json` / `.csv`
   - Neo4j용 `communication_graph.cypher`, `communication_graph.queries.cypher`
@@ -65,12 +74,13 @@ SCOUT는 펌웨어 분석 결과를 "가능한 취약점 목록"에서 멈추지
 ```
 펌웨어
   ├─ 추출/프로파일링
-  ├─ 인벤토리(파일/바이너리)
+  ├─ 인벤토리(파일/바이너리/하드닝 분석)
   ├─ 공격면 매핑(네트워크/서비스/프로토콜/엔트리포인트)
   ├─ 웹 UI 보안 스캔(HTML/JS 패턴, API 스펙 탐지)
   ├─ 취약점 패턴 + 체인 후보(브릿지 토큰 탐지 포함)
-  ├─ 동적 검증(부팅/포트/서비스/트래픽)
-  ├─ PoC/자동 공격체인 시도(실행 기반 증거)
+  ├─ LLM 트리아지 (보안 컨텍스트 기반 우선순위, haiku/sonnet/opus 자동 선택)
+  ├─ 동적 검증(3-Tier: FirmAE/QEMU user-mode/rootfs)
+  ├─ PoC/자동 공격체인 시도(유형별 템플릿 + LLM)
   └─ verified_chain report 생성
 ```
 
@@ -123,6 +133,11 @@ export AIEDGE_LLM_CHAIN_TIMEOUT_S=180
 export AIEDGE_LLM_CHAIN_MAX_ATTEMPTS=5
 export AIEDGE_AUTOPOC_LLM_TIMEOUT_S=180
 export AIEDGE_AUTOPOC_LLM_MAX_ATTEMPTS=4
+
+export AIEDGE_LLM_DRIVER=codex              # LLM provider (기본: codex)
+export AIEDGE_EMULATION_IMAGE=scout-emulation:latest  # Tier 1 Docker 이미지
+export AIEDGE_FIRMAE_ROOT=/opt/FirmAE        # FirmAE 경로 (기본)
+export AIEDGE_FEEDBACK_DIR=aiedge-feedback    # Terminator 피드백 디렉토리
 
 export AIEDGE_PORTSCAN_TOP_K=1000    # 힌트/우선 포트 + top-k 스캔 개수
 export AIEDGE_PORTSCAN_START=1
@@ -189,11 +204,13 @@ aiedge-runs/<run_id>/
 │  ├─ extraction/
 │  ├─ firmware_profile/
 │  ├─ inventory/
-│  │  └─ binary_analysis.json
+│  │  └─ binary_analysis.json  (+ 바이너리별 하드닝 데이터)
 │  ├─ surfaces/
 │  ├─ web_ui/
 │  │  └─ web_ui.json
 │  ├─ findings/
+│  ├─ llm_triage/
+│  │  └─ triage.json
 │  ├─ dynamic_validation/
 │  ├─ exploit_autopoc/
 │  └─ graph/

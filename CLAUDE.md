@@ -33,18 +33,24 @@ SCOUT (AIEdge) is a deterministic firmware-to-exploit evidence engine. It takes 
   --profile exploit --exploit-flag lab --exploit-attestation authorized --exploit-scope lab-only
 
 # Run tests
-pytest -q                                        # full suite (~380 tests)
+pytest -q                                        # full suite
 pytest -q tests/test_inventory.py                # single module
 pytest -q tests/test_inventory.py::test_func     # single test
+
+# Type checking (pyright configured via pyrightconfig.json)
+pyright src/
 
 # Verification scripts
 python3 scripts/verify_analyst_digest.py --run-dir aiedge-runs/<run_id>
 python3 scripts/verify_verified_chain.py --run-dir aiedge-runs/<run_id>
 scripts/release_gate.sh --run-dir aiedge-runs/<run_id>   # unified release gate
 
-# TUI dashboard
+# TUI dashboard (./scout provides shortcut aliases)
 ./scout tui aiedge-runs/<run_id> --interactive   # interactive mode
-./scout tw aiedge-runs/<run_id> -t 2             # live-refresh
+./scout tw aiedge-runs/<run_id> -t 2             # live-refresh (watch)
+./scout ti                                       # alias: tui -i (interactive, latest run)
+./scout to                                       # alias: tui -m once
+./scout t                                        # alias: tui (latest run)
 
 # Serve report viewer
 ./scout serve aiedge-runs/<run_id>
@@ -60,7 +66,7 @@ Stages execute sequentially via `run_stages()` in `src/aiedge/stage.py`. Each st
 
 Stages are registered as factory functions in `src/aiedge/stage_registry.py` (`_STAGE_FACTORIES` dict). Stage factories are instantiated by `run.py` which manages run directories, manifests, and report finalization.
 
-**Execution order:** tooling → extraction → structure → carving → firmware_profile → inventory → endpoints → surfaces → graph → attack_surface → functional_spec → threat_model → findings → llm_synthesis → dynamic_validation → emulation → exploit_chain → exploit_autopoc → poc_validation → exploit_policy (plus OTA-specific stages)
+**Execution order:** tooling → extraction → structure → carving → firmware_profile → inventory → endpoints → surfaces → web_ui → graph → attack_surface → functional_spec → threat_model → **findings** → **llm_triage** → llm_synthesis → attribution → dynamic_validation → emulation → exploit_gate → exploit_chain → exploit_autopoc → poc_validation → exploit_policy (plus OTA-specific stages: ota, ota_payload, ota_fs, ota_roots, ota_boottriage, firmware_lineage)
 
 ### Inter-Stage Communication
 
@@ -84,16 +90,27 @@ Stages have **no in-memory coupling**. Each stage reads JSON artifacts from pred
 - **Quality gates** (`quality_policy.py`, `quality_metrics.py`): Threshold checks and corpus-based evaluation
 - **Schema validation** (`schema.py`): Report validation, version tracking, verdict semantics
 
+### Findings Stage — Special Pattern
+
+The `findings` stage is **not** registered in `_STAGE_FACTORIES`. It runs as an integrated step via `run_findings(ctx)` called directly from `run.py` during full `analyze`/`analyze-8mb` execution, after all registered stages complete. It cannot be invoked standalone via `--stages findings`. Its output goes to `run_dir/stages/findings/*.json`.
+
 ### CLI Entry Point
 
-All CLI subcommands defined in `_build_parser()` (~line 3300 of `__main__.py`) and dispatched in `main()` (~line 3905). The TUI rendering logic (~2500 lines) is also in `__main__.py`.
+All CLI subcommands defined in `_build_parser()` (~line 3367 of `__main__.py`) and dispatched in `main()` (~line 3905). The TUI rendering logic (~2500 lines) is also in `__main__.py`. The `./scout` shell wrapper adds short aliases (`t`, `ti`, `tw`, `to`) and sets up `PYTHONPATH`.
+
+### Path Safety
+
+`_assert_under_dir()` is used across all 23+ stage modules to enforce that artifact paths stay within the run directory. This is a critical security invariant — every file write in a stage must pass this check.
 
 ## Adding a New Pipeline Stage
 
 1. Create `src/aiedge/your_stage.py` implementing the `Stage` protocol
 2. Add a factory function in `stage_registry.py` and register in `_STAGE_FACTORIES`
-3. Stage output goes to `run_dir/stages/your_stage/stage.json` + artifacts
-4. Add tests in `tests/test_your_stage.py`
+3. Use `_assert_under_dir(ctx.run_dir, path)` for all file writes
+4. Stage output goes to `run_dir/stages/your_stage/stage.json` + artifacts
+5. Add tests in `tests/test_your_stage.py`
+
+Recent example: `llm_triage` stage (`src/aiedge/llm_triage.py`) is registered in `_STAGE_FACTORIES` and runs between `findings` and `llm_synthesis`. It reads findings artifacts, applies LLM-assisted prioritization with security context, and writes `stages/llm_triage/triage.json`.
 
 ## Critical Coupling Points
 
@@ -114,6 +131,10 @@ Key configuration prefixes (no config files, environment-variable-driven):
 - `AIEDGE_DUPLICATE_*` — cross-run duplicate suppression
 - `AIEDGE_TUI_ASCII` — force ASCII-only TUI rendering
 - `AIEDGE_RUNS_DIRS` — custom run output directories
+- `AIEDGE_LLM_DRIVER` — LLM provider selection (default: codex)
+- `AIEDGE_EMULATION_IMAGE` — Docker image for Tier 1 FirmAE emulation (default: scout-emulation:latest)
+- `AIEDGE_FIRMAE_ROOT` — FirmAE installation path (default: /opt/FirmAE)
+- `AIEDGE_FEEDBACK_DIR` — Terminator feedback directory for bidirectional handoff
 
 ## Design Invariants
 

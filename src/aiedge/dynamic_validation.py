@@ -1623,7 +1623,7 @@ def _collect_tool_versions() -> dict[str, JsonValue]:
 
 @dataclass(frozen=True)
 class DynamicValidationStage:
-    firmae_root: str = "/home/rootk1m/FirmAE"
+    firmae_root: str = ""  # resolved at runtime from AIEDGE_FIRMAE_ROOT env
     boot_timeout_s: float = 480.0
     probe_timeout_s: float = 3.0
     capture_timeout_s: float = 10.0
@@ -1680,7 +1680,8 @@ class DynamicValidationStage:
             {"path": _rel_to_run_dir(ctx.run_dir, pcap_path)},
         ]
 
-        firmae_root = Path(self.firmae_root)
+        _resolved_firmae = self.firmae_root or os.environ.get("AIEDGE_FIRMAE_ROOT", "/opt/FirmAE")
+        firmae_root = Path(_resolved_firmae)
         run_sh = firmae_root / "run.sh"
         scratch_root = firmae_root / "scratch"
         attempt_count = max(1, int(self.max_retries))

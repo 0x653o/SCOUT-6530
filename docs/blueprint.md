@@ -42,8 +42,9 @@ flowchart TD
   inv --> surf[surfaces/endpoints/graph/attack_surface]
   surf --> webui[web_ui scan]
   webui --> find[findings]
-  find --> judge[tribunal/judge (LLM-as-judge)]
-  judge --> val[validator (dyn evidence)]
+  find --> triage[llm_triage (LLM 보안 컨텍스트 기반 우선순위)]
+  triage --> judge[tribunal/judge (LLM-as-judge)]
+  judge --> val[validator (dyn evidence, 3-tier: FirmAE/QEMU user-mode/rootfs)]
   val --> conf[confirmed]
   val --> hc[high_confidence_static]
 ```

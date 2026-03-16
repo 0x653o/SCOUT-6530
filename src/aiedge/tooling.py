@@ -149,7 +149,7 @@ class ToolingStage:
         "unsquashfs",
         "docker",
     )
-    _OPTIONAL_TOOLS: tuple[str, ...] = ("lzop", "ubidump")
+    _OPTIONAL_TOOLS: tuple[str, ...] = ("lzop", "ubidump", "checksec", "readelf", "file", "nm")
 
     @property
     def name(self) -> str:
@@ -206,6 +206,30 @@ class ToolingStage:
                 [["ubidump", "--help"], [sys.executable, "-m", "ubidump", "--help"]],
                 self.timeout_s,
                 which_name="ubidump",
+            ),
+            _ToolProbe(
+                "checksec",
+                [["checksec", "--version"], ["checksec", "--help"]],
+                self.timeout_s,
+                which_name="checksec",
+            ),
+            _ToolProbe(
+                "readelf",
+                [["readelf", "--version"]],
+                self.timeout_s,
+                which_name="readelf",
+            ),
+            _ToolProbe(
+                "file",
+                [["file", "--version"]],
+                self.timeout_s,
+                which_name="file",
+            ),
+            _ToolProbe(
+                "nm",
+                [["nm", "--version"]],
+                self.timeout_s,
+                which_name="nm",
             ),
         ]
 

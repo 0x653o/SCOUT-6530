@@ -470,6 +470,18 @@ def _make_threat_model_stage(
     return ThreatModelStage()
 
 
+def _make_llm_triage_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    _ = info, source_input_path, remaining_s
+    from .llm_triage import LLMTriageStage
+
+    return LLMTriageStage(no_llm=no_llm)
+
+
 def _make_llm_synthesis_stage(
     info: _RunInfoLike,
     source_input_path: str | None,
@@ -500,6 +512,7 @@ _STAGE_FACTORIES: dict[str, StageFactory] = {
     "attack_surface": _make_attack_surface_stage,
     "functional_spec": _make_functional_spec_stage,
     "threat_model": _make_threat_model_stage,
+    "llm_triage": _make_llm_triage_stage,
     "llm_synthesis": _make_llm_synthesis_stage,
     "attribution": _make_attribution_stage,
     "emulation": _make_emulation_stage,

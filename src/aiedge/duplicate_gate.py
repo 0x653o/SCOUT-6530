@@ -15,6 +15,12 @@ from .fingerprinting import (
     claim_fingerprint_sha256,
 )
 from .schema import JsonValue
+from .terminator_feedback import (
+    TerminatorVerdict,
+    load_feedback_registry,
+    _fingerprint_prefix,
+    _resolve_feedback_dir,
+)
 
 
 DUPLICATE_GATE_SCHEMA_VERSION = "duplicate-gate-v1"
@@ -31,6 +37,8 @@ _AUTO_REOPEN_LINEAGE_DIFF_DELTA = "lineage_diff_hash_delta"
 _AUTO_REOPEN_NOVELTY_THRESHOLD_MET = "novelty_threshold_met"
 _MANUAL_OVERRIDE_REASON = "manual_override"
 _FORCE_RETRIAGE_REASON = "force_retriage_override"
+_AUTO_REOPEN_TERMINATOR_CONFIRMED = "terminator_confirmed_boost"
+_AUTO_SUPPRESS_TERMINATOR_FP = "terminator_false_positive_suppress"
 
 _VOLATILE_META_KEYS = frozenset(
     {
@@ -808,6 +816,85 @@ def apply_duplicate_gate(
         report_section["warning_reasons"] = cast(
             list[JsonValue], cast(list[object], warnings_sorted)
         )
+
+    # --- Terminator feedback post-gate integration ---
+    # This runs AFTER the standard duplicate gate logic so that existing
+    # behaviour is never altered.  Feedback verdicts can reopen previously
+    # suppressed findings or further suppress new ones.
+    try:
+        feedback_verdicts = load_feedback_registry(_resolve_feedback_dir())
+    except Exception:
+        feedback_verdicts = []
+
+    if feedback_verdicts:
+        # Build prefix→verdict lookup (most recent wins)
+        _pfx_verdicts: dict[str, TerminatorVerdict] = {}
+        for _tv in feedback_verdicts:
+            _pfx = _fingerprint_prefix(_tv.finding_fingerprint)
+            _existing_tv = _pfx_verdicts.get(_pfx)
+            if _existing_tv is None or _tv.timestamp > _existing_tv.timestamp:
+                _pfx_verdicts[_pfx] = _tv
+
+        # Walk the novelty table looking for suppressed items that a
+        # "confirmed" verdict should reopen, or new items that a
+        # "false_positive" verdict should penalise.
+        feedback_reopened: list[dict[str, JsonValue]] = []
+        for n_entry in novelty_table:
+            fp_any = n_entry.get("fingerprint_sha256")
+            if not isinstance(fp_any, str):
+                continue
+            pfx = _fingerprint_prefix(fp_any)
+            tv = _pfx_verdicts.get(pfx)
+            if tv is None:
+                continue
+
+            status_any = n_entry.get("status")
+            if not isinstance(status_any, str):
+                continue
+
+            if tv.verdict == "confirmed" and status_any == "suppressed":
+                # Reopen: find the original finding in *findings* (the full
+                # input list) and add it back to out_findings.
+                for orig_finding in findings:
+                    try:
+                        orig_fp = claim_fingerprint_sha256(
+                            cast(dict[str, object], orig_finding)
+                        )
+                    except Exception:
+                        continue
+                    if _fingerprint_prefix(orig_fp) == pfx:
+                        if orig_finding not in out_findings:
+                            out_findings.append(dict(orig_finding))
+                            feedback_reopened.append(
+                                {
+                                    "fingerprint_sha256": orig_fp,
+                                    "reason": _AUTO_REOPEN_TERMINATOR_CONFIRMED,
+                                    "verdict": tv.verdict,
+                                    "original_run_id": tv.original_run_id,
+                                }
+                            )
+                        break
+
+            elif tv.verdict == "false_positive" and status_any == "new":
+                # Penalise novelty score for new findings that match a
+                # known false-positive verdict.
+                current_novelty_any = n_entry.get("novelty_score")
+                if isinstance(current_novelty_any, (int, float)):
+                    n_entry["novelty_score"] = _rounded_score(
+                        float(current_novelty_any) * 0.3
+                    )
+
+        if feedback_reopened:
+            if "terminator_feedback_reopened" not in artifact:
+                artifact["terminator_feedback_reopened"] = cast(
+                    list[JsonValue], cast(list[object], feedback_reopened)
+                )
+            reopened_count = report_section.get("reopened_count")
+            if isinstance(reopened_count, int):
+                report_section["reopened_count"] = reopened_count + len(
+                    feedback_reopened
+                )
+            report_section["terminator_feedback_applied"] = True
 
     return DuplicateGateResult(
         findings=out_findings,

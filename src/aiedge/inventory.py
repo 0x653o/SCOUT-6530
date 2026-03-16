@@ -792,6 +792,8 @@ def _scan_binary_analysis(
     max_bytes_per_file: int = 512 * 1024,
     max_hits: int = 200,
 ) -> tuple[dict[str, JsonValue], list[dict[str, JsonValue]], int]:
+    from .binary_hardening import parse_elf_hardening
+
     risky_symbol_counts: dict[str, int] = {k: 0 for k in _RISKY_BINARY_SYMBOLS}
     arch_counts: dict[str, int] = {}
     hits: list[dict[str, JsonValue]] = []
@@ -799,6 +801,12 @@ def _scan_binary_analysis(
     binaries_scanned = 0
     elf_binaries = 0
     risky_binaries = 0
+
+    # Hardening counters
+    nx_count = 0
+    pie_count = 0
+    relro_full = 0
+    canary_count = 0
 
     for path in files:
         if binaries_scanned >= int(max_binaries):
@@ -817,6 +825,25 @@ def _scan_binary_analysis(
         if not sample:
             continue
         arch = _elf_arch_from_file(path)
+        hardening = parse_elf_hardening(path) if isinstance(arch, str) else None
+        hardening_dict: dict[str, JsonValue] | None = None
+        if hardening is not None:
+            hardening_dict = {
+                "nx": hardening.nx,
+                "pie": hardening.pie,
+                "relro": hardening.relro,
+                "canary": hardening.canary,
+                "stripped": hardening.stripped,
+            }
+            if hardening.nx is True:
+                nx_count += 1
+            if hardening.pie is True:
+                pie_count += 1
+            if hardening.relro == "full":
+                relro_full += 1
+            if hardening.canary is True:
+                canary_count += 1
+
         if isinstance(arch, str):
             elf_binaries += 1
             arch_counts[arch] = int(arch_counts.get(arch, 0) + 1)
@@ -826,26 +853,36 @@ def _scan_binary_analysis(
             for symbol, marker in _RISKY_BINARY_SYMBOLS.items()
             if marker in sample
         ]
-        if not matched_symbols:
+        if not matched_symbols and hardening_dict is None:
             continue
 
-        risky_binaries += 1
-        for symbol in matched_symbols:
-            risky_symbol_counts[symbol] = int(risky_symbol_counts.get(symbol, 0) + 1)
+        if matched_symbols:
+            risky_binaries += 1
+            for symbol in matched_symbols:
+                risky_symbol_counts[symbol] = int(risky_symbol_counts.get(symbol, 0) + 1)
 
         if len(hits) < int(max_hits):
             rel = _rel_to_run_dir(run_dir, path)
             sha = hashlib.sha256(sample).hexdigest()
-            hits.append(
-                {
-                    "path": rel,
-                    "arch": arch or "unknown",
-                    "matched_symbols": cast(
-                        list[JsonValue], cast(list[object], sorted(set(matched_symbols)))
-                    ),
-                    "sample_sha256": sha,
-                }
-            )
+            hit: dict[str, JsonValue] = {
+                "path": rel,
+                "arch": arch or "unknown",
+                "matched_symbols": cast(
+                    list[JsonValue], cast(list[object], sorted(set(matched_symbols)))
+                ),
+                "sample_sha256": sha,
+            }
+            if hardening_dict is not None:
+                hit["hardening"] = cast(JsonValue, hardening_dict)
+            hits.append(hit)
+
+    hardening_summary: dict[str, JsonValue] = {
+        "elf_total": int(elf_binaries),
+        "nx_pct": round(nx_count / elf_binaries * 100, 1) if elf_binaries > 0 else 0.0,
+        "pie_pct": round(pie_count / elf_binaries * 100, 1) if elf_binaries > 0 else 0.0,
+        "relro_full_pct": round(relro_full / elf_binaries * 100, 1) if elf_binaries > 0 else 0.0,
+        "canary_pct": round(canary_count / elf_binaries * 100, 1) if elf_binaries > 0 else 0.0,
+    }
 
     summary: dict[str, JsonValue] = {
         "binaries_scanned": int(binaries_scanned),
@@ -860,6 +897,7 @@ def _scan_binary_analysis(
             dict[str, JsonValue],
             {k: int(v) for k, v in sorted(arch_counts.items())},
         ),
+        "hardening_summary": cast(JsonValue, hardening_summary),
     }
     return summary, hits, skipped_files
 

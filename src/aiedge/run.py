@@ -871,6 +871,41 @@ def _write_firmware_handoff(
     if profile == "exploit" and exploit_gate is not None:
         handoff["exploit_gate"] = exploit_gate
 
+    # --- Terminator feedback request ---
+    try:
+        from .terminator_feedback import generate_feedback_request as _gen_fb_req
+
+        _candidates_for_fb: list[dict[str, JsonValue]] = []
+        for bundle in bundles:
+            if not isinstance(bundle, dict):
+                continue
+            stage_any = bundle.get("stage")
+            if stage_any == "findings":
+                artifacts_any = bundle.get("artifacts")
+                if isinstance(artifacts_any, list):
+                    for art_rel in artifacts_any:
+                        if not isinstance(art_rel, str):
+                            continue
+                        if "exploit_candidates" in art_rel:
+                            _ec_path = info.run_dir / art_rel
+                            if _ec_path.is_file():
+                                try:
+                                    _ec_raw = json.loads(
+                                        _ec_path.read_text(encoding="utf-8")
+                                    )
+                                    if isinstance(_ec_raw, dict):
+                                        _ec_cands = _ec_raw.get("candidates")
+                                        if isinstance(_ec_cands, list):
+                                            _candidates_for_fb = cast(
+                                                list[dict[str, JsonValue]],
+                                                cast(list[object], _ec_cands),
+                                            )
+                                except Exception:
+                                    pass
+        handoff["feedback_request"] = _gen_fb_req(_candidates_for_fb)
+    except Exception:
+        pass  # fail-open: feedback request generation is best-effort
+
     handoff_path = info.run_dir / "firmware_handoff.json"
     _ = handoff_path.write_text(
         json.dumps(handoff, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
@@ -2009,6 +2044,18 @@ def _apply_stage_result_to_report(
         }
         return
 
+    if stage == "llm_triage":
+        triage_evidence = normalize_evidence_list(
+            details.get("evidence"),
+            fallback=[{"path": "stages/llm_triage", "note": "evidence missing"}],
+        )
+        report["llm_triage"] = {
+            "status": stage_result.status,
+            "evidence": cast(list[JsonValue], cast(list[object], triage_evidence)),
+            "details": details,
+        }
+        return
+
     if stage == "poc_validation":
         poc_validation_evidence = normalize_evidence_list(
             details.get("evidence"),
@@ -3094,6 +3141,40 @@ def analyze_run(
         report["findings"] = cast(
             list[JsonValue], cast(list[object], deduped_findings_early)
         )
+        # LLM triage: re-prioritise findings with security context
+        try:
+            from .llm_triage import LLMTriageStage
+
+            _llm_triage_stage_early: Stage = LLMTriageStage(no_llm=no_llm)
+            _llm_triage_rep_early = run_stages([_llm_triage_stage_early], ctx)
+            _write_stage_manifests(
+                ctx=ctx,
+                stages=[_llm_triage_stage_early],
+                report=_llm_triage_rep_early,
+            )
+            for _triage_sr_early in _llm_triage_rep_early.stage_results:
+                _apply_stage_result_to_report(report, _triage_sr_early, budget_s=budget_s)
+            if _llm_triage_rep_early.limitations:
+                _existing_lims_triage_early = normalize_limitations_list(
+                    report.get("limitations")
+                )
+                report["limitations"] = cast(
+                    list[JsonValue],
+                    list(_existing_lims_triage_early)
+                    + list(_llm_triage_rep_early.limitations),
+                )
+        except Exception as _triage_exc_early:
+            _existing_lims_triage_err_early = normalize_limitations_list(
+                report.get("limitations")
+            )
+            report["limitations"] = cast(
+                list[JsonValue],
+                list(_existing_lims_triage_err_early)
+                + [
+                    "llm_triage execution failed: "
+                    + f"{type(_triage_exc_early).__name__}: {_triage_exc_early}"
+                ],
+            )
         llm_synthesis_limits_early = _rerun_llm_synthesis_after_findings(
             ctx=ctx,
             report=report,
@@ -3973,6 +4054,39 @@ def analyze_run(
         force_retriage=force_retriage,
     )
     report["findings"] = cast(list[JsonValue], cast(list[object], deduped_findings))
+    # LLM triage: re-prioritise findings with security context
+    try:
+        from .llm_triage import LLMTriageStage
+
+        _llm_triage_stage: Stage = LLMTriageStage(no_llm=no_llm)
+        _llm_triage_rep = run_stages([_llm_triage_stage], ctx)
+        _write_stage_manifests(
+            ctx=ctx,
+            stages=[_llm_triage_stage],
+            report=_llm_triage_rep,
+        )
+        for _triage_sr in _llm_triage_rep.stage_results:
+            _apply_stage_result_to_report(report, _triage_sr, budget_s=budget_s)
+        if _llm_triage_rep.limitations:
+            _existing_lims_triage = normalize_limitations_list(
+                report.get("limitations")
+            )
+            report["limitations"] = cast(
+                list[JsonValue],
+                list(_existing_lims_triage) + list(_llm_triage_rep.limitations),
+            )
+    except Exception as _triage_exc:
+        _existing_lims_triage_err = normalize_limitations_list(
+            report.get("limitations")
+        )
+        report["limitations"] = cast(
+            list[JsonValue],
+            list(_existing_lims_triage_err)
+            + [
+                "llm_triage execution failed: "
+                + f"{type(_triage_exc).__name__}: {_triage_exc}"
+            ],
+        )
     llm_synthesis_limits = _rerun_llm_synthesis_after_findings(
         ctx=ctx,
         report=report,

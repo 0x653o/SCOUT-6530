@@ -101,6 +101,55 @@ Firmware handoff compatibility note (backward-compatible):
   - `aiedge.run_id`, `aiedge.run_dir`
   - non-empty `bundles[].artifacts` (run-relative paths)
 
+## Terminator → SCOUT Feedback Protocol
+
+### Feedback Registry Format
+
+Terminator writes verdicts to `aiedge-feedback/registry.json` (or the path specified by `AIEDGE_FEEDBACK_DIR`):
+
+```json
+{
+  "schema_version": "terminator-feedback-v1",
+  "verdicts": [
+    {
+      "finding_fingerprint": "sha256:...",
+      "verdict": "false_positive",
+      "confidence_override": 0.15,
+      "rationale": "String match was in test data",
+      "original_run_id": "aiedge-run-20260315-...",
+      "timestamp": "2026-03-16T00:00:00Z"
+    }
+  ]
+}
+```
+
+Valid `verdict` values: `confirmed`, `false_positive`, `wont_fix`, `needs_info`.
+
+### SCOUT Consumption
+
+SCOUT reads feedback from `AIEDGE_FEEDBACK_DIR` env var (default: `aiedge-feedback/`).
+
+Verdicts affect:
+- **Finding scores:** `confirmed` boosts score (×1.15), `false_positive` suppresses (×0.5). `confidence_override` applies directly when present.
+- **Duplicate gate novelty:** `confirmed` verdicts can reopen previously suppressed findings. `false_positive` verdicts reduce novelty score of similar new findings.
+- **Candidate prioritization:** `wont_fix` sets priority to `"low"`.
+
+### Feedback Request (SCOUT → Terminator)
+
+`firmware_handoff.json` includes a `feedback_request` section with priority findings most in need of Terminator review:
+
+```json
+{
+  "feedback_request": {
+    "priority_findings": ["candidate-id-1", "candidate-id-2"],
+    "expected_feedback_path": "aiedge-feedback/registry.json",
+    "feedback_schema_version": "terminator-feedback-v1"
+  }
+}
+```
+
+Priority selection favours candidates with mid-range confidence (0.4–0.7) and chain-backed candidates without prior feedback.
+
 ## Example request/response
 
 See:

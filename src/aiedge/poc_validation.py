@@ -10,6 +10,9 @@ from .schema import JsonValue
 from .stage import StageContext, StageOutcome
 
 _REASON_PROFILE_NOT_EXPLOIT = "POLICY_PROFILE_NOT_EXPLOIT"
+_REASON_REPRODUCIBILITY_CONSISTENT = "POLICY_REPRODUCIBILITY_CONSISTENT"
+_REASON_REPRODUCIBILITY_INCONSISTENT = "POLICY_REPRODUCIBILITY_INCONSISTENT"
+_REASON_REPRODUCIBILITY_NO_DATA = "POLICY_REPRODUCIBILITY_NO_DATA"
 _REASON_EXPLOIT_GATE_MISSING = "POLICY_EXPLOIT_GATE_MISSING"
 _REASON_SCOPE_NOT_LAB_ONLY = "POLICY_SCOPE_NOT_LAB_ONLY"
 _REASON_ATTESTATION_NOT_AUTHORIZED = "POLICY_ATTESTATION_NOT_AUTHORIZED"
@@ -86,6 +89,106 @@ def _canonical_input_identity(
         "sha256": "",
         "sha256_source": "missing",
     }
+
+
+def _validate_poc_reproducibility(
+    ctx: StageContext,
+    *,
+    max_reruns: int = 3,
+) -> list[dict[str, JsonValue]]:
+    """Validate PoC reproducibility from existing evidence bundles.
+
+    Reads evidence_bundle.json files from exploits/chain_*/  and checks
+    whether the readback_hash values across attempts are consistent.
+    When all attempts in a bundle share the same readback_hash, the PoC
+    is considered reproducible for that chain.
+
+    Returns a list of per-chain reproducibility check results.
+    """
+    exploits_dir = ctx.run_dir / "exploits"
+    if not exploits_dir.is_dir():
+        return []
+
+    results: list[dict[str, JsonValue]] = []
+    for chain_dir in sorted(exploits_dir.iterdir()):
+        if not chain_dir.is_dir() or not chain_dir.name.startswith("chain_"):
+            continue
+        bundle_path = chain_dir / "evidence_bundle.json"
+        if not bundle_path.is_file():
+            continue
+        try:
+            raw = cast(object, json.loads(bundle_path.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        bundle = cast(dict[str, object], raw)
+        chain_id = str(bundle.get("chain_id", chain_dir.name))
+        attempts_any = bundle.get("attempts")
+        if not isinstance(attempts_any, list):
+            results.append({
+                "chain_id": chain_id,
+                "status": "no_data",
+                "result_code": _REASON_REPRODUCIBILITY_NO_DATA,
+                "note": "No attempts array in evidence bundle.",
+            })
+            continue
+
+        attempts = cast(list[object], attempts_any)
+        if not attempts:
+            results.append({
+                "chain_id": chain_id,
+                "status": "no_data",
+                "result_code": _REASON_REPRODUCIBILITY_NO_DATA,
+                "note": "Empty attempts array in evidence bundle.",
+            })
+            continue
+
+        # Extract readback_hash values from proof_evidence strings
+        hashes: list[str] = []
+        for attempt_any in attempts[:max_reruns]:
+            if not isinstance(attempt_any, dict):
+                continue
+            attempt = cast(dict[str, object], attempt_any)
+            evidence_str = str(attempt.get("proof_evidence", ""))
+            # Parse readback_hash=<value> from evidence string
+            for token in evidence_str.split():
+                if token.startswith("readback_hash="):
+                    hash_val = token[len("readback_hash="):]
+                    if hash_val and hash_val != "none":
+                        hashes.append(hash_val)
+                    break
+
+        if not hashes:
+            results.append({
+                "chain_id": chain_id,
+                "status": "no_data",
+                "result_code": _REASON_REPRODUCIBILITY_NO_DATA,
+                "note": "No readback_hash values found in attempt evidence.",
+            })
+            continue
+
+        unique_hashes = set(hashes)
+        if len(unique_hashes) == 1:
+            results.append({
+                "chain_id": chain_id,
+                "status": "consistent",
+                "result_code": _REASON_REPRODUCIBILITY_CONSISTENT,
+                "attempts_checked": len(hashes),
+                "readback_hash": hashes[0],
+                "note": "All attempts produced the same readback_hash.",
+            })
+        else:
+            results.append({
+                "chain_id": chain_id,
+                "status": "inconsistent",
+                "result_code": _REASON_REPRODUCIBILITY_INCONSISTENT,
+                "attempts_checked": len(hashes),
+                "unique_hashes": len(unique_hashes),
+                "note": "Attempts produced different readback_hash values.",
+            })
+
+    return results
 
 
 @dataclass(frozen=True)
@@ -317,6 +420,21 @@ class PocValidationStage:
             },
         ]
 
+        # Reproducibility validation from existing evidence bundles
+        reproducibility_results = _validate_poc_reproducibility(ctx)
+        if reproducibility_results:
+            for repro_item in reproducibility_results:
+                repro_status = str(repro_item.get("status", "no_data"))
+                repro_code = str(
+                    repro_item.get("result_code", _REASON_REPRODUCIBILITY_NO_DATA)
+                )
+                checks.append({
+                    "id": f"reproducibility:{repro_item.get('chain_id', 'unknown')}",
+                    "status": "ok" if repro_status == "consistent" else repro_status,
+                    "result_code": repro_code,
+                    "note": str(repro_item.get("note", "")),
+                })
+
         stage_status = "ok" if not blocked_sorted else "failed"
         _ = validation_path.write_text(
             json.dumps(
@@ -328,6 +446,7 @@ class PocValidationStage:
                     "checks": checks,
                     "blocked": blocked_sorted,
                     "exploit_gate": gate,
+                    "reproducibility": reproducibility_results,
                 },
                 indent=2,
                 sort_keys=True,

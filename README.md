@@ -42,12 +42,21 @@ SCOUT doesn't guess. Each stage produces **hash-anchored artifacts** in a `run_d
 
 ## What changed recently (quick sync notes)
 
+- **Binary hardening analysis** — Pure-Python ELF parser detects NX, PIE, RELRO, Stack Canary, and Stripped status per binary. Integrated into `inventory/binary_analysis.json` with `hardening_summary`. Findings scores are adjusted based on hardening (fully hardened: x0.7, no protection: x1.15).
+- **3-tier emulation** — Emulation stage now supports three tiers: Tier 1 FirmAE system emulation (Docker container, no sudo required), Tier 2 QEMU user-mode service probing (lighttpd, busybox, dnsmasq, sshd, etc.), Tier 3 rootfs inspection (Alpine Docker fallback). Configure via `AIEDGE_EMULATION_IMAGE` and `AIEDGE_FIRMAE_ROOT`.
+- **Endian-aware architecture detection** — MIPS and ARM binaries are now classified with endianness: `mips_be`, `mips_le`, `arm_be`, `arm_le` (previously just `mips-32`/`arm-32`).
+- **LLM driver abstraction** — New `llm_driver.py` provides an `LLMDriver` Protocol with `CodexCLIDriver` implementation. All three LLM call sites (llm_synthesis, exploit_autopoc, llm_codex) now use `resolve_driver()`. Select provider via `AIEDGE_LLM_DRIVER` env var. Supports `ModelTier` ("haiku"|"sonnet"|"opus").
+- **Vulnerability-type PoC templates** — `poc_templates.py` provides a template registry with 4 vulnerability-specific skeletons: `cmd_injection`, `path_traversal`, `auth_bypass`, `info_disclosure` (+ `tcp_banner` fallback). Standalone PoC files in `poc_skeletons/`.
+- **Real PCAP capture** in `exploit_runner.py` — tcpdump capture when available (PCAP placeholder fallback retained).
+- **PoC reproducibility validation** — `poc_validation` now verifies readback_hash consistency across reproduction runs.
+- **LLM-assisted finding triage** (`llm_triage` stage) — New stage between `findings` and `llm_synthesis`. Auto-selects model tier: <10 candidates → haiku, 10–50 → sonnet, >50 → opus. Includes hardening and attack_surface security context in prompts. Graceful skip under `--no-llm`.
+- **Bidirectional Terminator feedback loop** — `terminator_feedback.py` adds `feedback_request` section to `firmware_handoff.json`. Terminator verdicts (confirmed boost, false_positive suppress) feed back into `duplicate_gate`. Configure via `AIEDGE_FEEDBACK_DIR`.
 - `--rootfs /path/to/extracted_rootfs` is now supported on `analyze` and `analyze-8mb`.
   - This bypasses weak/partial unpacking for multi-layer firmware layouts (e.g., nested tar/gzip/bzip2/cpio/ext images).
 - Extraction now has a built-in quality gate.
   - Low extraction coverage is marked as insufficient (`partial`) with explicit operator guidance.
 - Inventory now emits deeper artifacts:
-  - `stages/inventory/binary_analysis.json`
+  - `stages/inventory/binary_analysis.json` (+ hardening data per binary)
   - `inventory.json.quality` + `inventory.json.binary_analysis_summary`
   - config-driven service hints (`services`, `inetd`, `xinetd`, web server configs).
 - `firmware_profile` now cross-checks OS/arch hints from discovered ELF binaries (`arch_guess`, `elf_hints`) to reduce RTOS false positives.
@@ -75,6 +84,8 @@ SCOUT doesn't guess. Each stage produces **hash-anchored artifacts** in a `run_d
 │                         SCOUT (Evidence Engine)                          │
 │                                                                          │
 │  Firmware ──► Unpack ──► Profile ──► Inventory ──► Surface ──► Findings  │
+│                                        (+ hardening)                     │
+│  ──► LLM Triage ──► LLM Synthesis ──► Emulation(3-tier) ──► Exploit     │
 │                                                                          │
 │  StageFactory stages: stage.json (sha256 manifest)                       │
 │  Findings step: run_findings() writes structured artifacts               │
@@ -246,7 +257,8 @@ stages/inventory/
 ├── stage.json
 ├── inventory.json         # file/binary catalog with coverage metrics
 ├── string_hits.json       # interesting string patterns across all binaries
-└── binary_analysis.json   # risky symbol/arch summary for discovered binaries
+└── binary_analysis.json   # risky symbol/arch summary + hardening data per binary
+                           #   (NX, PIE, RELRO, Canary, Stripped via pure-Python ELF parser)
 ```
 
 **`inventory.json` key fields:**
@@ -415,6 +427,38 @@ Each chain maps a complete attack path from initial access to impact:
 }
 ```
 
+### LLM Triage (between findings and llm_synthesis)
+
+Prioritizes and filters finding candidates using LLM-assisted security context analysis before synthesis.
+
+```
+stages/llm_triage/
+├── stage.json
+└── triage.json            # prioritized findings with security context scores
+```
+
+**Model tier auto-selection:**
+
+| Candidate Count | Model Tier | Rationale |
+|:----------------|:-----------|:----------|
+| < 10 | haiku | Fast pass, low token cost |
+| 10–50 | sonnet | Balanced reasoning |
+| > 50 | opus | Deep analysis for large candidate sets |
+
+The triage prompt includes hardening data and attack_surface security context per finding. Under `--no-llm`, the stage gracefully skips and passes findings through unmodified.
+
+### 3-Tier Emulation
+
+The emulation stage now supports three tiers, attempted in order:
+
+| Tier | Method | Requirements | What it proves |
+|:-----|:-------|:-------------|:---------------|
+| 1 | FirmAE system emulation | Docker (`AIEDGE_EMULATION_IMAGE`), no sudo | Full boot, network services reachable |
+| 2 | QEMU user-mode service probing | `qemu-*-static` binaries | Individual service execution (lighttpd, busybox httpd, dnsmasq, sshd) |
+| 3 | rootfs inspection | Alpine Docker (fallback) | File-level checks without execution |
+
+Endian detection is now architecture-aware: `mips_be`, `mips_le`, `arm_be`, `arm_le` are distinguished from ELF headers.
+
 ---
 
 ## Exploit Promotion Policy
@@ -489,7 +533,11 @@ firmware_handoff.json (SCOUT-generated contract)
 ├── bundles[]:
 │   ├── id / stage / attempt / status
 │   └── artifacts[] (run-relative, existence-checked)
-└── exploit_gate (only when profile=exploit)
+├── exploit_gate (only when profile=exploit)
+└── feedback_request:
+    ├── request_id
+    ├── findings_pending_review[]   # finding IDs awaiting Terminator verdict
+    └── prior_verdicts[]            # confirmed boost / false_positive suppress from previous runs
 ```
 
 **Terminator agents for firmware pipeline:**
@@ -691,7 +739,7 @@ aiedge-runs/<timestamp>_<sha256-prefix>/
 │   │   ├── stage.json
 │   │   ├── inventory.json                     # file catalog + coverage metrics
 │   │   ├── string_hits.json                   # interesting strings across binaries
-│   │   └── binary_analysis.json               # binary risk/arch summary
+│   │   └── binary_analysis.json               # binary risk/arch summary (+ hardening per binary)
 │   ├── surfaces/
 │   │   ├── stage.json
 │   │   ├── surfaces.json                      # network services + interfaces
@@ -700,13 +748,15 @@ aiedge-runs/<timestamp>_<sha256-prefix>/
 │   ├── web_ui/
 │   │   ├── stage.json
 │   │   └── web_ui.json                        # JS/HTML security pattern hits
-│   └── findings/
-│       ├── pattern_scan.json                  # structured findings
-│       ├── binary_strings_hits.json           # string-level evidence
-│       ├── chains.json                        # kill-chain hypotheses
-│       ├── review_gates.json                  # scoring per finding
-│       ├── known_disclosures.json             # CVE matches
-│       └── poc_skeletons/                     # safe templates
+│   ├── findings/
+│   │   ├── pattern_scan.json                  # structured findings
+│   │   ├── binary_strings_hits.json           # string-level evidence
+│   │   ├── chains.json                        # kill-chain hypotheses
+│   │   ├── review_gates.json                  # scoring per finding
+│   │   ├── known_disclosures.json             # CVE matches
+│   │   └── poc_skeletons/                     # safe templates
+│   └── llm_triage/
+│       └── triage.json                        # LLM-prioritized findings with security context
 └── report/
     ├── report.json                            # aggregated report
     ├── report.html                            # human-readable
@@ -768,7 +818,7 @@ aiedge-runs/<timestamp>_<sha256-prefix>/
 | Ghidra (headless + MCP) | Decompilation, CFG, function signatures |
 | radare2 (+ MCP) | Disassembly, xrefs, string analysis |
 | readelf / objdump | ELF metadata, sections, symbols |
-| checksec | Protection matrix (NX/PIE/RELRO/Canary) |
+| checksec | Protection matrix — now integrated into inventory via pure-Python ELF parser (external checksec optional) |
 | strings | Raw string extraction |
 | FLIRT/Lumina | Library function signature matching |
 | rbasefind | Base address detection for RTOS blobs |

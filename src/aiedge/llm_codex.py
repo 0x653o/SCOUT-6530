@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
@@ -268,30 +267,31 @@ def run_codex_exec_summary(
         "input_preview": payload,
     }
 
-    attempts: list[dict[str, JsonValue]] = []
+    from .llm_driver import resolve_driver
 
-    def run_once(argv_i: list[str]) -> subprocess.CompletedProcess[str]:
-        proc_i = subprocess.run(
-            argv_i,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout,
-            stdin=subprocess.DEVNULL,
-        )
+    driver = resolve_driver()
+    # max_attempts=2 gives: first try, then skip-git-repo-check fallback
+    result = driver.execute(
+        prompt=prompt,
+        run_dir=run_dir,
+        timeout_s=effective_timeout,
+        max_attempts=2,
+        retryable_tokens=(),
+    )
+
+    # Map driver attempts to site-specific log format
+    attempts: list[dict[str, JsonValue]] = []
+    for att in result.attempts:
         attempts.append(
             {
-                "argv": cast(JsonValue, list(argv_i)),
-                "exit_code": cast(JsonValue, proc_i.returncode),
-                "stdout": _truncate_text(proc_i.stdout or ""),
-                "stderr": _truncate_text(proc_i.stderr or ""),
+                "argv": cast(JsonValue, list(att.get("argv", []))),
+                "exit_code": cast(JsonValue, att.get("returncode", -1)),
+                "stdout": _truncate_text(str(att.get("stdout", ""))),
+                "stderr": _truncate_text(str(att.get("stderr", ""))),
             }
         )
-        return proc_i
 
-    try:
-        proc = run_once(argv)
-    except FileNotFoundError:
+    if result.status == "missing_cli":
         log_obj["exit_code"] = None
         log_obj["stdout"] = ""
         log_obj["stderr"] = "codex executable not found in PATH"
@@ -301,13 +301,10 @@ def run_codex_exec_summary(
             "reason": "Codex CLI executable missing during `codex exec` attempt",
             "log": {"path": "stages/llm/llm.log"},
         }
-    except subprocess.TimeoutExpired as exc:
-        stdout_s = _truncate_text(
-            (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        )
-        stderr_s = _truncate_text(
-            (exc.stderr or "") if isinstance(exc.stderr, str) else ""
-        )
+
+    if result.status == "timeout":
+        stdout_s = _truncate_text(result.stdout)
+        stderr_s = _truncate_text(result.stderr)
         log_obj["exit_code"] = None
         log_obj["stdout"] = stdout_s
         log_obj["stderr"] = stderr_s
@@ -319,13 +316,9 @@ def run_codex_exec_summary(
             "log": {"path": "stages/llm/llm.log"},
         }
 
-    stderr_lc0 = (proc.stderr or "").lower()
-    if proc.returncode != 0 and "skip-git-repo-check" in stderr_lc0:
-        proc = run_once(base_argv + ["--skip-git-repo-check", prompt])
-
-    stdout_s2 = _truncate_text(proc.stdout or "")
-    stderr_s2 = _truncate_text(proc.stderr or "")
-    log_obj["exit_code"] = proc.returncode
+    stdout_s2 = _truncate_text(result.stdout)
+    stderr_s2 = _truncate_text(result.stderr)
+    log_obj["exit_code"] = result.returncode
     log_obj["stdout"] = stdout_s2
     log_obj["stderr"] = stderr_s2
     log_obj["attempts"] = cast(JsonValue, attempts)
@@ -335,7 +328,7 @@ def run_codex_exec_summary(
             log_obj["executed_argv"] = cast(JsonValue, list(last_argv))
     _ = log_path.write_text(json.dumps(log_obj, indent=2, sort_keys=True) + "\n")
 
-    if proc.returncode == 0:
+    if result.returncode == 0:
         out: dict[str, JsonValue] = {
             "status": "ok",
             "reason": "Codex summary completed",
@@ -350,7 +343,7 @@ def run_codex_exec_summary(
             }
         return out
 
-    stderr_lc = (proc.stderr or "").lower()
+    stderr_lc = result.stderr.lower()
     if "login" in stderr_lc or "auth" in stderr_lc:
         return {
             "status": "skipped",
@@ -360,6 +353,6 @@ def run_codex_exec_summary(
 
     return {
         "status": "failed",
-        "reason": f"Codex summary failed with exit code {proc.returncode}",
+        "reason": f"Codex summary failed with exit code {result.returncode}",
         "log": {"path": "stages/llm/llm.log"},
     }
