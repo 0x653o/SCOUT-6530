@@ -914,7 +914,26 @@ def _scan_binary_analysis(
             for symbol, marker in _RISKY_BINARY_SYMBOLS.items()
             if marker in sample
         ]
-        if not matched_symbols and hardening_dict is None:
+
+        # Extract IPC indicators for all ELF binaries (before the risky-symbol
+        # early-continue so we don't miss binaries that only have IPC signals).
+        ipc_ind = extract_elf_ipc_indicators(path) if isinstance(arch, str) else None
+        ipc_data: dict[str, object] = {}
+        if ipc_ind is not None:
+            if ipc_ind.unix_socket_paths:
+                ipc_data["unix_socket_paths"] = list(ipc_ind.unix_socket_paths)
+            if ipc_ind.dbus_interfaces:
+                ipc_data["dbus_interfaces"] = list(ipc_ind.dbus_interfaces)
+            if ipc_ind.shm_names:
+                ipc_data["shm_names"] = list(ipc_ind.shm_names)
+            if ipc_ind.pipe_references:
+                ipc_data["pipe_references"] = True
+            if ipc_ind.fork_exec_references:
+                ipc_data["fork_exec_references"] = True
+            if ipc_ind.ipc_symbols:
+                ipc_data["ipc_symbols"] = list(ipc_ind.ipc_symbols)
+
+        if not matched_symbols and hardening_dict is None and not ipc_data:
             continue
 
         if matched_symbols:
@@ -935,23 +954,8 @@ def _scan_binary_analysis(
             }
             if hardening_dict is not None:
                 hit["hardening"] = cast(JsonValue, hardening_dict)
-            ipc_ind = extract_elf_ipc_indicators(path)
-            if ipc_ind is not None:
-                ipc_data: dict[str, object] = {}
-                if ipc_ind.unix_socket_paths:
-                    ipc_data["unix_socket_paths"] = list(ipc_ind.unix_socket_paths)
-                if ipc_ind.dbus_interfaces:
-                    ipc_data["dbus_interfaces"] = list(ipc_ind.dbus_interfaces)
-                if ipc_ind.shm_names:
-                    ipc_data["shm_names"] = list(ipc_ind.shm_names)
-                if ipc_ind.pipe_references:
-                    ipc_data["pipe_references"] = True
-                if ipc_ind.fork_exec_references:
-                    ipc_data["fork_exec_references"] = True
-                if ipc_ind.ipc_symbols:
-                    ipc_data["ipc_symbols"] = list(ipc_ind.ipc_symbols)
-                if ipc_data:
-                    hit["ipc_indicators"] = cast(JsonValue, ipc_data)
+            if ipc_data:
+                hit["ipc_indicators"] = cast(JsonValue, ipc_data)
             hits.append(hit)
 
     hardening_summary: dict[str, JsonValue] = {

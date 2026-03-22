@@ -1710,7 +1710,7 @@ class GraphStage:
         # Collect IPC paths per component from binary_analysis
         binary_analysis_path = run_dir / "stages" / "inventory" / "binary_analysis.json"
         binary_analysis = _load_json_object(binary_analysis_path)
-        binaries_any = binary_analysis.get("binaries") if binary_analysis is not None else None
+        binaries_any = binary_analysis.get("hits") if binary_analysis is not None else None
         binaries_list: list[dict[str, object]] = []
         if isinstance(binaries_any, list):
             for b in binaries_any:

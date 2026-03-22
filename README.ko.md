@@ -36,6 +36,11 @@ SCOUT는 펌웨어 분석 결과를 "가능한 취약점 목록"에서 멈추지
 
 ## 최근 동기화 포인트
 
+- **IPC 감지 파이프라인** — 펌웨어 rootfs에서 Unix socket, D-Bus 서비스, 공유 메모리, named pipe 감지. ELF 바이너리 `.rodata`/`.dynstr` IPC 심볼 스캔 (socket, bind, dbus_*, shm_open, fork, execve). 새로운 `ipc_channel` 그래프 노드와 IPC 엣지 5종 (`ipc_unix_socket`, `ipc_dbus`, `ipc_shm`, `ipc_pipe`, `ipc_exec_chain`). IPC 리스크 스코어링.
+- **Source→Sink 경로 추적** — `surfaces` 스테이지에서 `source_sink_graph.json` 생성. 네트워크 엔드포인트 → 서비스 컴포넌트 → exec sink 바이너리(system, popen, execve) 경로 매핑. "외부 입력이 어디서 위험한 함수에 도달하는가?" 분석 가능.
+- **Credential 자동 매핑** — `findings` 스테이지에서 `credential_mapping.json` 생성. SSH 키, 비밀번호 해시, API 토큰, 기본 자격증명을 auth 서피스(SSH, web, OS)에 매핑. 위험도 분류(high/medium/low).
+- **Verifier reason code 개선** — `dynamic_validation`에서 `isolation_verified`/`boot_verified`/`pcap_captured` 생성, `poc_validation`에서 `repro_3_of_3` 생성. findings가 `VERIFIED` 판정 상태에 도달하는 경로 활성화.
+- **인터랙티브 웹 뷰어** — 글래스모피즘 다크 테마, 순수 JS force-directed 그래프 (외부 의존성 없음). 새 패널: IPC Map, Source→Sink Paths, Credential Map, Risk Heatmap. 스탯 카드 그리드, 파이프라인 진행률 바, 접이식 카드, 다크/라이트 토글, 글로벌 검색.
 - **바이너리 하드닝 분석** — 순수 Python ELF 파서로 NX, PIE, RELRO, Stack Canary, Stripped 상태를 바이너리별로 수집. `inventory/binary_analysis.json`에 `hardening_summary` 포함. findings 점수에 하드닝 기반 보정 적용 (fully hardened: x0.7, no protection: x1.15).
 - **3-Tier 에뮬레이션** — Tier 1: FirmAE 시스템 에뮬레이션(Docker 컨테이너, sudo 불필요), Tier 2: QEMU user-mode 서비스 프로빙(lighttpd, busybox, dnsmasq, sshd 등), Tier 3: rootfs 검사(Alpine Docker fallback). `AIEDGE_EMULATION_IMAGE`, `AIEDGE_FIRMAE_ROOT` env var로 설정.
 - **엔디안 인식 아키텍처 감지** — MIPS/ARM 빅/리틀엔디안 정확 구분: `mips_be`, `mips_le`, `arm_be`, `arm_le`.

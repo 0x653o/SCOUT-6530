@@ -42,6 +42,11 @@ SCOUT doesn't guess. Each stage produces **hash-anchored artifacts** in a `run_d
 
 ## What changed recently (quick sync notes)
 
+- **IPC detection pipeline** — Unix socket, D-Bus service, shared memory, named pipe detection from firmware rootfs. ELF binary `.rodata`/`.dynstr` scanning for IPC symbols (socket, bind, dbus_*, shm_open, fork, execve). New `ipc_channel` graph nodes and 5 IPC edge types (`ipc_unix_socket`, `ipc_dbus`, `ipc_shm`, `ipc_pipe`, `ipc_exec_chain`). IPC-specific risk scoring in attack surface.
+- **Source→sink path tracing** — `surfaces` stage now generates `source_sink_graph.json` linking network-facing endpoints through service components to exec sink binaries (system, popen, execve). Enables "where does input reach dangerous functions?" analysis.
+- **Credential auto-mapping** — `findings` stage generates `credential_mapping.json` mapping SSH keys, password hashes, API tokens, and default credentials to auth surfaces (SSH, web, OS). Risk-rated (high/medium/low).
+- **Verifier reason codes** — `dynamic_validation` emits `isolation_verified`/`boot_verified`/`pcap_captured`; `poc_validation` emits `repro_3_of_3`. These enable findings to reach `VERIFIED` verdict state.
+- **Interactive web viewer** — Glassmorphism dark theme with pure JS force-directed graph (no external dependencies). New panels: IPC Map, Source→Sink Paths, Credential Map, Risk Heatmap. Stat card grids, pipeline progress bar, collapsible cards, dark/light toggle, global search.
 - **Binary hardening analysis** — Pure-Python ELF parser detects NX, PIE, RELRO, Stack Canary, and Stripped status per binary. Integrated into `inventory/binary_analysis.json` with `hardening_summary`. Findings scores are adjusted based on hardening (fully hardened: x0.7, no protection: x1.15).
 - **3-tier emulation** — Emulation stage now supports three tiers: Tier 1 FirmAE system emulation (Docker container, no sudo required), Tier 2 QEMU user-mode service probing (lighttpd, busybox, dnsmasq, sshd, etc.), Tier 3 rootfs inspection (Alpine Docker fallback). Configure via `AIEDGE_EMULATION_IMAGE` and `AIEDGE_FIRMAE_ROOT`.
 - **Endian-aware architecture detection** — MIPS and ARM binaries are now classified with endianness: `mips_be`, `mips_le`, `arm_be`, `arm_le` (previously just `mips-32`/`arm-32`).

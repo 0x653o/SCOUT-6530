@@ -290,7 +290,7 @@ _UNIX_SOCKET_PATH_RE: re.Pattern[bytes] = re.compile(
     rb"(?:/var/run|/tmp|/run)/[^\x00\s\"'<>]{1,128}\.s(?:ock(?:et)?|ock)"
 )
 _DBUS_INTERFACE_RE: re.Pattern[bytes] = re.compile(
-    rb"(?:org|com|net|io)\.[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+){2,}"
+    rb"(?:org|com|net|io|fi|de|uk|ru|eu|fr|jp|cn|ca|au)\.[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+){1,}"
 )
 _SHM_PATH_RE: re.Pattern[bytes] = re.compile(
     rb"/dev/shm/[^\x00\s\"'<>]{1,128}"
@@ -425,10 +425,15 @@ def extract_elf_ipc_indicators(path: Path) -> ELFIPCIndicators | None:
             fork_exec_references = True
             break
 
-    # --- Regex scanning in .rodata ---
+    # --- Regex scanning in .rodata (with fallback to tail of binary) ---
     unix_socket_paths: list[str] = []
     dbus_interfaces: list[str] = []
     shm_names: list[str] = []
+
+    if not rodata_data and len(data) > 1024:
+        # Fallback: scan the last 512 KB of the binary for string patterns
+        # when .rodata section was not found (e.g. stripped/statically linked).
+        rodata_data = data[-(min(len(data), 512 * 1024)):]
 
     if rodata_data:
         for m in _UNIX_SOCKET_PATH_RE.finditer(rodata_data):

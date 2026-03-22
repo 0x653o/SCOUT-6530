@@ -79,6 +79,8 @@ Stages are registered as factory functions in `src/aiedge/stage_registry.py` (`_
 
 **Execution order:** tooling → extraction → structure → carving → firmware_profile → inventory → endpoints → surfaces → web_ui → graph → attack_surface → functional_spec → threat_model → **findings** → **llm_triage** → llm_synthesis → attribution → dynamic_validation → emulation → exploit_gate → exploit_chain → exploit_autopoc → poc_validation → exploit_policy (plus OTA-specific stages: ota, ota_payload, ota_fs, ota_roots, ota_boottriage, firmware_lineage)
 
+**IPC detection flow:** inventory → endpoints → surfaces → graph → attack_surface. ELF `.rodata`/`.dynstr` IPC symbol extraction occurs in inventory; `ipc_channel` graph nodes and 5 IPC edge types (`ipc_unix_socket`, `ipc_dbus`, `ipc_shm`, `ipc_pipe`, `ipc_exec_chain`) are emitted by graph stage.
+
 ### Inter-Stage Communication
 
 Stages have **no in-memory coupling**. Each stage reads JSON artifacts from predecessor directories in `run_dir/stages/<predecessor>/` and writes to `run_dir/stages/<own_name>/`. The `stage.json` file in each stage directory records status, timing, artifact paths with SHA-256 hashes, and limitations.
@@ -180,3 +182,5 @@ Key configuration prefixes (no config files, environment-variable-driven):
 | `docs/verified_chain_contract.md` | Verified chain evidence requirements |
 | `docs/aiedge_duplicate_gate_contract.md` | Cross-run duplicate suppression rules |
 | `docs/runbook.md` | Operator flow for digest-first review |
+| `stages/surfaces/source_sink_graph.json` | Source→sink path tracing artifact (`source-sink-v1`) |
+| `stages/findings/credential_mapping.json` | Credential-to-auth-surface mapping artifact (`credential-mapping-v1`) |

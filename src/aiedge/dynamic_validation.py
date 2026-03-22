@@ -1952,6 +1952,27 @@ class DynamicValidationStage:
         if fallback_payload is not None:
             summary_doc["fallback"] = fallback_payload
 
+        reason_codes: list[str] = []
+        if open_ports:
+            reason_codes.append("isolation_verified")
+        if boot_success:
+            reason_codes.append("boot_verified")
+        elif boot_attempted and not boot_blocked:
+            if saw_timeout:
+                reason_codes.append("boot_timeout")
+            else:
+                reason_codes.append("boot_flaky")
+        if isinstance(pcap_capture, dict) and pcap_capture.get("status") == "captured":
+            reason_codes.append("pcap_captured")
+        if snapshot_commands and any(
+            isinstance(cmd, dict) and cmd.get("returncode") == 0
+            for cmd in snapshot_commands
+        ):
+            reason_codes.append("firewall_snapshot_ok")
+
+        summary_doc["verification_reason_codes"] = cast(
+            list[JsonValue], cast(list[object], sorted(reason_codes))
+        )
         _write_json(summary_path, summary_doc)
         evidence.append({"path": _rel_to_run_dir(ctx.run_dir, summary_path)})
 
@@ -1966,6 +1987,9 @@ class DynamicValidationStage:
             "privileged_executor": _privileged_executor_payload(
                 executor=privileged_executor,
                 run_dir=ctx.run_dir,
+            ),
+            "verification_reason_codes": cast(
+                list[JsonValue], cast(list[object], sorted(reason_codes))
             ),
         }
 

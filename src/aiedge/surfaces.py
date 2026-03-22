@@ -128,6 +128,270 @@ def _load_json_object(path: Path) -> dict[str, object] | None:
     return cast(dict[str, object], raw)
 
 
+_EXEC_SINK_SYMBOLS = frozenset(
+    {
+        "system",
+        "popen",
+        "execve",
+        "execvp",
+        "execvpe",
+        "execl",
+        "execlp",
+        "execle",
+        "execv",
+        "posix_spawn",
+        "backtick",
+        "eval",
+        "shell_exec",
+        "passthru",
+    }
+)
+
+_SOURCE_ENDPOINT_TYPES = frozenset({"url", "http_path", "ipv4", "http_endpoint", "cgi_path"})
+
+
+def _build_source_sink_graph(
+    *,
+    run_dir: Path,
+    endpoints_obj: dict[str, object] | None,
+    inventory_obj: dict[str, object] | None,
+    surfaces_list: list[dict[str, JsonValue]],
+    max_paths: int = 200,
+) -> tuple[list[dict[str, JsonValue]], list[str]]:
+    """Build source→component→sink paths from endpoints + binary analysis data."""
+    limitations: list[str] = []
+    paths: list[dict[str, JsonValue]] = []
+
+    # --- Load binary_analysis.json ---
+    binary_analysis_path = run_dir / "stages" / "inventory" / "binary_analysis.json"
+    binary_analysis_obj = _load_json_object(binary_analysis_path)
+
+    # --- Collect sink binaries (binaries with exec-related risky symbols) ---
+    # Each sink: {"binary": name, "symbols": [...], "evidence_path": rel_path}
+    sink_binaries: list[dict[str, object]] = []
+    if binary_analysis_obj is not None:
+        binaries_any = binary_analysis_obj.get("hits")
+        if isinstance(binaries_any, list):
+            for bin_any in cast(list[object], binaries_any):
+                if not isinstance(bin_any, dict):
+                    continue
+                bin_obj = cast(dict[str, object], bin_any)
+                # Gather risky symbols for this binary
+                risky_syms_any = bin_obj.get("matched_symbols") or bin_obj.get("risky_symbols")
+                risky_count_any = bin_obj.get("risky_symbol_count")
+                found_syms: list[str] = []
+                if isinstance(risky_syms_any, list):
+                    for sym_any in cast(list[object], risky_syms_any):
+                        if isinstance(sym_any, str) and sym_any.lower() in _EXEC_SINK_SYMBOLS:
+                            found_syms.append(sym_any)
+                elif isinstance(risky_count_any, (int, float)) and int(risky_count_any) > 0:
+                    # Count > 0 but no symbol list — treat as unknown exec sink
+                    found_syms = ["(exec_sink_detected)"]
+                if not found_syms:
+                    continue
+                bin_name_any = bin_obj.get("name") or bin_obj.get("path") or bin_obj.get("binary")
+                if not isinstance(bin_name_any, str) or not bin_name_any:
+                    continue
+                bin_path_any = bin_obj.get("path") or bin_obj.get("name")
+                evidence_path = (
+                    _safe_non_absolute_rel(cast(str, bin_path_any))
+                    if isinstance(bin_path_any, str)
+                    else "unresolved_path"
+                )
+                sink_binaries.append(
+                    {
+                        "binary": bin_name_any,
+                        "symbols": found_syms,
+                        "evidence_path": evidence_path,
+                    }
+                )
+    else:
+        limitations.append(
+            "binary_analysis.json missing or unreadable; sink detection limited"
+        )
+
+    if not sink_binaries:
+        # No sinks — nothing to trace
+        return [], limitations
+
+    # --- Collect source endpoints ---
+    sources: list[dict[str, object]] = []
+    if endpoints_obj is not None:
+        endpoints_any = endpoints_obj.get("endpoints")
+        if isinstance(endpoints_any, list):
+            for ep_any in cast(list[object], endpoints_any):
+                if not isinstance(ep_any, dict):
+                    continue
+                ep = cast(dict[str, object], ep_any)
+                ep_type_any = ep.get("type") or ep.get("endpoint_type")
+                ep_value_any = ep.get("value") or ep.get("endpoint") or ep.get("url")
+                ep_conf_any = ep.get("confidence")
+                if not isinstance(ep_type_any, str):
+                    ep_type_any = "http_path"
+                if not isinstance(ep_value_any, str) or not ep_value_any:
+                    continue
+                if ep_type_any.lower() not in _SOURCE_ENDPOINT_TYPES:
+                    continue
+                conf = float(ep_conf_any) if isinstance(ep_conf_any, (int, float)) else 0.5
+                sources.append(
+                    {
+                        "type": ep_type_any,
+                        "value": ep_value_any,
+                        "confidence": _clamp01(conf),
+                    }
+                )
+
+    if not sources:
+        limitations.append(
+            "No network-facing source endpoints found; source→sink tracing skipped"
+        )
+        return [], limitations
+
+    # --- Build component map from surfaces for endpoint→component resolution ---
+    # component_name → set of evidence_refs
+    component_evidence: dict[str, set[str]] = {}
+    for surf in surfaces_list:
+        comp_any = surf.get("component")
+        refs_any = surf.get("evidence_refs")
+        if not isinstance(comp_any, str):
+            continue
+        if isinstance(refs_any, list):
+            for ref_any in cast(list[object], refs_any):
+                if isinstance(ref_any, str):
+                    component_evidence.setdefault(comp_any, set()).add(ref_any)
+
+    # Also pull service_candidates from inventory for component resolution
+    # Map: component name → list of evidence file paths
+    service_comp_map: dict[str, list[str]] = {}
+    if inventory_obj is not None:
+        cands_any = inventory_obj.get("service_candidates")
+        if isinstance(cands_any, list):
+            for cand_any in cast(list[object], cands_any):
+                if not isinstance(cand_any, dict):
+                    continue
+                cand = cast(dict[str, object], cand_any)
+                cname_any = cand.get("name")
+                evid_any = cand.get("evidence")
+                if not isinstance(cname_any, str) or not cname_any:
+                    continue
+                refs: list[str] = []
+                if isinstance(evid_any, list):
+                    for item_any in cast(list[object], evid_any):
+                        if not isinstance(item_any, dict):
+                            continue
+                        p_any = cast(dict[str, object], item_any).get("path")
+                        if isinstance(p_any, str) and p_any:
+                            refs.append(p_any)
+                service_comp_map[cname_any] = refs
+
+    # Pick a default component if any exist
+    default_component: str | None = None
+    if service_comp_map:
+        default_component = next(iter(service_comp_map))
+    elif surfaces_list:
+        comp_any2 = surfaces_list[0].get("component")
+        if isinstance(comp_any2, str):
+            default_component = comp_any2
+
+    # --- Build paths ---
+    endpoints_ref = "stages/endpoints/endpoints.json"
+    binary_ref = "stages/inventory/binary_analysis.json"
+
+    for source in sources:
+        if len(paths) >= max_paths:
+            limitations.append(
+                f"source_sink_graph reached max_paths cap ({max_paths}); additional paths skipped"
+            )
+            break
+
+        src_type = cast(str, source["type"])
+        src_value = cast(str, source["value"])
+        src_conf = cast(float, source["confidence"])
+
+        # Find matching component — prefer one whose evidence path contains the endpoint value
+        matched_component: str | None = None
+        comp_evidence_path: str = ""
+        for comp_name, refs in service_comp_map.items():
+            for ref in refs:
+                if src_value.lower() in ref.lower() or comp_name.lower() in src_value.lower():
+                    matched_component = comp_name
+                    comp_evidence_path = ref
+                    break
+            if matched_component:
+                break
+
+        if matched_component is None:
+            matched_component = default_component or "unknown_component"
+            comp_evidence_path = (
+                service_comp_map.get(matched_component, [""])[0]
+                if service_comp_map.get(matched_component)
+                else ""
+            )
+
+        for sink in sink_binaries:
+            if len(paths) >= max_paths:
+                break
+
+            sink_binary = cast(str, sink["binary"])
+            sink_symbols = cast(list[str], sink["symbols"])
+            sink_evidence = cast(str, sink["evidence_path"])
+
+            # Compute sink_proximity: does sink live near the component's rootfs?
+            sink_proximity = 0.2
+            if comp_evidence_path and sink_evidence and sink_evidence != "unresolved_path":
+                # Same directory → 1.0; same rootfs prefix → 0.5
+                comp_dir = "/".join(comp_evidence_path.replace("\\", "/").split("/")[:-1])
+                sink_dir = "/".join(sink_evidence.replace("\\", "/").split("/")[:-1])
+                if comp_dir and sink_dir and comp_dir == sink_dir:
+                    sink_proximity = 1.0
+                elif comp_dir and sink_dir and (
+                    comp_dir.startswith(sink_dir) or sink_dir.startswith(comp_dir)
+                ):
+                    sink_proximity = 0.5
+
+            # component_match: 1.0 if we matched by value/name, 0.5 if default
+            component_match = 1.0 if matched_component != default_component else 0.5
+
+            combined_conf = _clamp01(
+                src_conf * 0.5 + sink_proximity * 0.3 + component_match * 0.2
+            )
+
+            through_evidence = comp_evidence_path if comp_evidence_path else endpoints_ref
+            path_entry: dict[str, JsonValue] = {
+                "source": {
+                    "type": src_type,
+                    "value": src_value,
+                    "confidence": src_conf,
+                },
+                "through": cast(
+                    list[JsonValue],
+                    cast(
+                        list[object],
+                        [
+                            {
+                                "type": "component",
+                                "name": matched_component,
+                                "evidence": through_evidence,
+                            }
+                        ],
+                    ),
+                ),
+                "sink": {
+                    "type": "exec_sink",
+                    "binary": sink_binary,
+                    "symbols": cast(list[JsonValue], cast(list[object], sink_symbols)),
+                },
+                "confidence": combined_conf,
+                "evidence_refs": cast(
+                    list[JsonValue],
+                    cast(list[object], [endpoints_ref, binary_ref]),
+                ),
+            }
+            paths.append(path_entry)
+
+    return paths, limitations
+
+
 @dataclass(frozen=True)
 class SurfacesStage:
     max_surfaces: int = 200
@@ -332,13 +596,54 @@ class SurfacesStage:
             encoding="utf-8",
         )
 
+        # --- Source→Sink path tracing ---
+        source_sink_json = stage_dir / "source_sink_graph.json"
+        _assert_under_dir(run_dir, source_sink_json)
+        ss_paths, ss_limitations = _build_source_sink_graph(
+            run_dir=run_dir,
+            endpoints_obj=endpoints_obj,
+            inventory_obj=inventory_obj,
+            surfaces_list=surfaces,
+            max_paths=200,
+        )
+        if ss_limitations:
+            limitations.extend(ss_limitations)
+        source_count = len(
+            {p["source"]["value"] for p in ss_paths if isinstance(p.get("source"), dict)}  # type: ignore[index]
+        )
+        sink_count = len(
+            {
+                p["sink"]["binary"]  # type: ignore[index]
+                for p in ss_paths
+                if isinstance(p.get("sink"), dict)
+            }
+        )
+        ss_payload: dict[str, JsonValue] = {
+            "schema_version": "source-sink-v1",
+            "paths": cast(list[JsonValue], cast(list[object], ss_paths)),
+            "summary": {
+                "total_paths": len(ss_paths),
+                "high_confidence": len(
+                    [p for p in ss_paths if cast(float, p.get("confidence", 0.0)) >= 0.7]
+                ),
+                "sources": source_count,
+                "sinks": sink_count,
+            },
+        }
+        _ = source_sink_json.write_text(
+            json.dumps(ss_payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+
         evidence.append({"path": _rel_to_run_dir(run_dir, out_json)})
+        evidence.append({"path": _rel_to_run_dir(run_dir, source_sink_json)})
         details: dict[str, JsonValue] = {
             "summary": summary,
             "surfaces": cast(list[JsonValue], cast(list[object], surfaces)),
             "unknowns": cast(list[JsonValue], cast(list[object], unknowns)),
             "evidence": cast(list[JsonValue], cast(list[object], evidence)),
             "surfaces_json": _rel_to_run_dir(run_dir, out_json),
+            "source_sink_graph_json": _rel_to_run_dir(run_dir, source_sink_json),
             "classification": "candidate",
             "observation": "static_reference",
         }

@@ -435,6 +435,26 @@ class PocValidationStage:
                     "note": str(repro_item.get("note", "")),
                 })
 
+        all_chains_consistent = bool(reproducibility_results) and all(
+            str(cast(dict[str, object], r).get("status", "")) == "consistent"
+            for r in reproducibility_results
+        )
+        any_chain_inconsistent = any(
+            str(cast(dict[str, object], r).get("status", "")) == "inconsistent"
+            for r in reproducibility_results
+        )
+        total_checked = sum(
+            int(cast(dict[str, object], r).get("attempts_checked", 0))
+            for r in reproducibility_results
+            if isinstance(cast(dict[str, object], r).get("attempts_checked"), int)
+        )
+
+        verification_reason_codes: list[str] = []
+        if all_chains_consistent and total_checked >= 1:
+            verification_reason_codes.append("repro_3_of_3")
+        elif any_chain_inconsistent:
+            verification_reason_codes.append("poc_repro_failed")
+
         stage_status = "ok" if not blocked_sorted else "failed"
         _ = validation_path.write_text(
             json.dumps(
@@ -447,6 +467,7 @@ class PocValidationStage:
                     "blocked": blocked_sorted,
                     "exploit_gate": gate,
                     "reproducibility": reproducibility_results,
+                    "verification_reason_codes": sorted(verification_reason_codes),
                 },
                 indent=2,
                 sort_keys=True,
@@ -476,6 +497,10 @@ class PocValidationStage:
                     list[JsonValue], cast(list[object], list(checked_paths))
                 ),
                 "evidence": evidence,
+                "verification_reason_codes": cast(
+                    list[JsonValue],
+                    cast(list[object], sorted(verification_reason_codes)),
+                ),
             },
             limitations=(
                 []

@@ -29,6 +29,11 @@
 - PoC 재현성 검증: `poc_validation`에서 readback_hash 일관성 확인으로 재현성 보장.
 - LLM 트리아지 스테이지: findings → `llm_triage` → llm_synthesis 순서로 실행. 모델 티어 자동 선택 (<10: haiku, 10-50: sonnet, >50: opus). 하드닝/attack_surface 보안 컨텍스트 포함 프롬프트. `--no-llm`에서 graceful skip.
 - Terminator 양방향 피드백 루프: `terminator_feedback.py`가 `firmware_handoff.json`에 `feedback_request` 섹션 추가. Terminator 판정(confirmed boost, false_positive suppress)이 `duplicate_gate`에 반영. `AIEDGE_FEEDBACK_DIR` env var.
+- IPC 감지 파이프라인: Unix socket, D-Bus, SHM, named pipe 감지. ELF `.rodata`/`.dynstr` IPC 심볼 추출. `ipc_channel` 그래프 노드 + IPC 엣지 5종 (`ipc_unix_socket`, `ipc_dbus`, `ipc_shm`, `ipc_pipe`, `ipc_exec_chain`). IPC 리스크 스코어링.
+- Source→Sink 경로 추적: `stages/surfaces/source_sink_graph.json` 생성. 네트워크 엔드포인트 → 서비스 컴포넌트 → exec sink 바이너리 경로 매핑.
+- Credential 자동 매핑: `stages/findings/credential_mapping.json` 생성. SSH 키, 비밀번호 해시, API 토큰 → auth surface 매핑. 위험도 분류(high/medium/low).
+- Verifier reason code 개선: `dynamic_validation`에서 `isolation_verified`/`boot_verified` 생성, `poc_validation`에서 `repro_3_of_3` 생성. VERIFIED 판정 경로 활성화.
+- 인터랙티브 웹 뷰어: 글래스모피즘 다크 테마, 순수 JS force-directed 그래프, IPC Map/Source→Sink/Credential Map 패널. 파이프라인 진행률 바, 접이식 카드, 다크/라이트 토글.
 
 ## Known Issues (중요)
 
@@ -43,3 +48,5 @@
 2) 바이너리 심층 분석: checksec 수준은 통합 완료. Ghidra headless 디컴파일 + LLM 분석 연계가 다음 목표
 3) FirmAE 호환 펌웨어 커버리지 확대 (Tier 1 에뮬레이션 성공률 향상)
 4) (오케스트레이터 레이어) tribunal/judge + validator evidence를 통한 confirmed 승격 정책 E2E 강화
+5) IPC 경로 자동 exploit 후보 연계: `source_sink_graph.json` 고신뢰 경로를 exploit_candidates에 자동 승격
+6) Credential 매핑 결과를 verified_chain 증거 번들에 통합

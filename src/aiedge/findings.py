@@ -124,6 +124,229 @@ def _is_key_like_path(path_s: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Credential mapping constants
+# ---------------------------------------------------------------------------
+
+_CREDENTIAL_FILE_PATTERNS: dict[str, str] = {
+    "id_rsa": "ssh_private_key",
+    "id_dsa": "ssh_private_key",
+    "id_ecdsa": "ssh_private_key",
+    "id_ed25519": "ssh_private_key",
+    "authorized_keys": "ssh_authorized_key",
+    "shadow": "password_hash",
+    "passwd": "user_database",
+    ".htpasswd": "web_password",
+    ".htaccess": "web_auth_config",
+    "wpa_supplicant.conf": "wifi_credential",
+    "psk": "pre_shared_key",
+}
+
+_CREDENTIAL_STRING_PATTERNS: list[tuple[str, str]] = [
+    (r"password\s*[:=]\s*\S+", "hardcoded_password"),
+    (r"api[_-]?key\s*[:=]\s*\S+", "api_key"),
+    (r"token\s*[:=]\s*\S+", "auth_token"),
+    (r"secret\s*[:=]\s*\S+", "secret_value"),
+    (r"BEGIN\s+(RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY", "private_key_pem"),
+    (r"default.*password|password.*default", "default_credential"),
+]
+
+_CREDENTIAL_RISK: dict[str, str] = {
+    "ssh_private_key": "high",
+    "password_hash": "high",
+    "hardcoded_password": "high",
+    "default_credential": "high",
+    "private_key_pem": "high",
+    "api_key": "medium",
+    "auth_token": "medium",
+    "secret_value": "medium",
+    "web_password": "medium",
+    "web_auth_config": "medium",
+    "pre_shared_key": "medium",
+    "wifi_credential": "medium",
+    "ssh_authorized_key": "low",
+    "user_database": "low",
+}
+
+
+def _credential_auth_surface(cred_type: str) -> str:
+    """Map a credential type to the most likely auth surface."""
+    if cred_type.startswith("ssh_") or cred_type == "private_key_pem":
+        return "ssh"
+    if cred_type in ("web_password", "web_auth_config"):
+        return "web"
+    if cred_type in ("wifi_credential", "pre_shared_key"):
+        return "local"
+    if cred_type in ("password_hash", "user_database"):
+        return "os"
+    return "unknown"
+
+
+def _build_credential_mapping(
+    run_dir: Path,
+    candidate_roots: list[Path],
+    inv_strings_path: Path,
+    surfaces_path: Path,
+    endpoints_path: Path,
+    *,
+    max_mappings: int = 500,
+) -> dict[str, JsonValue]:
+    """Scan filesystem roots and string hits for credential-like material.
+
+    Returns a ``credential-mapping-v1`` payload suitable for writing to
+    ``stages/findings/credential_mapping.json``.
+    """
+    mappings: list[dict[str, JsonValue]] = []
+
+    # Build a surface lookup: surface name → first matching component string
+    surface_components: dict[str, str] = {}
+    if surfaces_path.exists():
+        surfaces_obj = _safe_load_json(surfaces_path)
+        if isinstance(surfaces_obj, dict):
+            surfaces_map = cast(dict[str, object], surfaces_obj)
+            surfaces_list_any = surfaces_map.get("surfaces") or surfaces_map.get(
+                "classified"
+            )
+            if isinstance(surfaces_list_any, list):
+                for surf_any in cast(list[object], surfaces_list_any):
+                    if not isinstance(surf_any, dict):
+                        continue
+                    surf = cast(dict[str, object], surf_any)
+                    sname_any = surf.get("surface") or surf.get("type")
+                    scomp_any = surf.get("component") or surf.get("binary")
+                    if isinstance(sname_any, str) and isinstance(scomp_any, str):
+                        key = sname_any.lower()
+                        if key not in surface_components:
+                            surface_components[key] = scomp_any
+
+    def _surface_component(surface: str) -> str | None:
+        return surface_components.get(surface.lower())
+
+    def _make_mapping(
+        cred_type: str,
+        file_path_rel: str,
+        source: str,
+        *,
+        snippet: str | None = None,
+    ) -> dict[str, JsonValue]:
+        surface = _credential_auth_surface(cred_type)
+        risk = _CREDENTIAL_RISK.get(cred_type, "medium")
+        ev_refs: list[JsonValue] = [cast(JsonValue, file_path_rel)]
+        entry: dict[str, JsonValue] = {
+            "credential_type": cred_type,
+            "file_path": file_path_rel,
+            "auth_surface": surface,
+            "confidence": 0.75 if source == "file" else 0.65,
+            "risk_level": risk,
+            "evidence_refs": cast(list[JsonValue], ev_refs),
+        }
+        comp = _surface_component(surface)
+        if comp:
+            entry["surface_component"] = comp
+        if snippet:
+            entry["snippet"] = _safe_ascii_text(snippet, max_len=120)
+        return entry
+
+    # --- 1. File-name based scan ---
+    seen_paths: set[str] = set()
+    for root in candidate_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            for p in root.rglob("*"):
+                if len(mappings) >= max_mappings:
+                    break
+                if not p.is_file():
+                    continue
+                name = p.name.lower()
+                matched_type: str | None = None
+                for pattern_name, ctype in _CREDENTIAL_FILE_PATTERNS.items():
+                    if name == pattern_name or name.endswith("/" + pattern_name):
+                        matched_type = ctype
+                        break
+                if matched_type is None:
+                    continue
+                try:
+                    rel = p.resolve().relative_to(run_dir.resolve())
+                    rel_posix = rel.as_posix()
+                except Exception:
+                    continue
+                if rel_posix in seen_paths:
+                    continue
+                seen_paths.add(rel_posix)
+                mappings.append(_make_mapping(matched_type, rel_posix, "file"))
+        except Exception:
+            continue
+        if len(mappings) >= max_mappings:
+            break
+
+    # --- 2. String-hits based scan ---
+    if inv_strings_path.exists() and len(mappings) < max_mappings:
+        hits_obj = _safe_load_json(inv_strings_path)
+        if isinstance(hits_obj, dict):
+            hits_map = cast(dict[str, object], hits_obj)
+            # string_hits.json may have a "hits" list or be a flat dict of counts
+            hits_list_any = hits_map.get("hits") or hits_map.get("string_hits")
+            if isinstance(hits_list_any, list):
+                compiled: list[tuple[re.Pattern[str], str]] = [
+                    (re.compile(pat, re.IGNORECASE), ctype)
+                    for pat, ctype in _CREDENTIAL_STRING_PATTERNS
+                ]
+                for hit_any in cast(list[object], hits_list_any):
+                    if len(mappings) >= max_mappings:
+                        break
+                    if not isinstance(hit_any, dict):
+                        continue
+                    hit = cast(dict[str, object], hit_any)
+                    text_any = hit.get("value") or hit.get("text") or hit.get("string")
+                    path_any = hit.get("path") or hit.get("file")
+                    if not isinstance(text_any, str) or not text_any:
+                        continue
+                    file_rel = str(path_any) if isinstance(path_any, str) else "stages/inventory/string_hits.json"
+                    for compiled_pat, ctype in compiled:
+                        m = compiled_pat.search(text_any)
+                        if m:
+                            key = f"{ctype}:{file_rel}:{text_any[:80]}"
+                            if key in seen_paths:
+                                continue
+                            seen_paths.add(key)
+                            mappings.append(
+                                _make_mapping(
+                                    ctype,
+                                    file_rel,
+                                    "string_hit",
+                                    snippet=text_any[:120],
+                                )
+                            )
+                            break  # one match per hit entry
+
+    # --- Build summary ---
+    by_type: dict[str, int] = {}
+    by_surface: dict[str, int] = {}
+    high_risk = 0
+    for m in mappings:
+        ct = str(m.get("credential_type", "unknown"))
+        sv = str(m.get("auth_surface", "unknown"))
+        rl = str(m.get("risk_level", "medium"))
+        by_type[ct] = by_type.get(ct, 0) + 1
+        by_surface[sv] = by_surface.get(sv, 0) + 1
+        if rl == "high":
+            high_risk += 1
+
+    summary: dict[str, JsonValue] = {
+        "total_credentials": len(mappings),
+        "by_type": cast(dict[str, JsonValue], {k: v for k, v in by_type.items()}),
+        "by_surface": cast(dict[str, JsonValue], {k: v for k, v in by_surface.items()}),
+        "high_risk": high_risk,
+    }
+
+    return {
+        "schema_version": "credential-mapping-v1",
+        "mappings": cast(list[JsonValue], cast(list[object], mappings)),
+        "summary": cast(JsonValue, summary),
+    }
+
+
 def _evidence_path(
     run_dir: Path, path: Path, *, note: str | None = None
 ) -> dict[str, JsonValue]:
@@ -3193,6 +3416,25 @@ def run_findings(
     _stable_dump_json(review_gates_path, review_gates_payload)
     _stable_dump_json(exploit_candidates_path, exploit_candidates_payload)
     _stable_dump_json(known_disclosures_path, known_disclosures_payload)
+
+    # --- Credential mapping ---
+    surfaces_json = ctx.run_dir / "stages" / "surfaces" / "surfaces.json"
+    endpoints_json = ctx.run_dir / "stages" / "endpoints" / "endpoints.json"
+    credential_mapping_path = stage_dir / "credential_mapping.json"
+    _assert_under_dir(stage_dir, credential_mapping_path)
+    credential_mapping_payload = _build_credential_mapping(
+        run_dir=ctx.run_dir,
+        candidate_roots=candidate_roots,
+        inv_strings_path=inv_strings,
+        surfaces_path=surfaces_json,
+        endpoints_path=endpoints_json,
+    )
+    if _contains_absolute_path_value(credential_mapping_payload):
+        raise AIEdgePolicyViolation(
+            "credential_mapping.json payload contains absolute-path value"
+        )
+    _stable_dump_json(credential_mapping_path, credential_mapping_payload)
+
     skeleton_written = _write_safe_poc_skeletons(
         skeleton_dir=skeleton_dir,
         chains=cast(
@@ -3206,6 +3448,7 @@ def run_findings(
     stage_evidence.append(_evidence_path(ctx.run_dir, review_gates_path))
     stage_evidence.append(_evidence_path(ctx.run_dir, exploit_candidates_path))
     stage_evidence.append(_evidence_path(ctx.run_dir, known_disclosures_path))
+    stage_evidence.append(_evidence_path(ctx.run_dir, credential_mapping_path))
     stage_evidence.append(
         _evidence_path(
             ctx.run_dir,

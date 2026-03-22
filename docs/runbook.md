@@ -268,6 +268,30 @@ python3 scripts/verify_aiedge_analyst_report.py --run-dir <run_dir>
 
 - Fail-closed rule: if cockpit cards disagree with verifier output, or required artifacts/verifier results are missing, treat the run as non-verified.
 
+## IPC) Review IPC relationships
+
+After analysis, check IPC channels in the viewer:
+
+```bash
+./scout serve <run_dir> --host 0.0.0.0 --port 8080
+```
+
+The IPC Map panel shows:
+- Detected IPC channels (Unix sockets, D-Bus, SHM)
+- Connected components per channel
+- Evidence paths
+
+## SS) Review source→sink paths
+
+The Source → Sink Paths panel shows traced paths from network endpoints through service components to exec sink binaries. High-confidence paths indicate where external input may reach dangerous functions (system, execve, popen).
+
+## CM) Review credential mapping
+
+The Credential Map panel shows:
+- SSH private keys, password hashes, API tokens found in firmware
+- Risk level (high/medium/low) per credential
+- Mapped auth surface (SSH, web, OS)
+
 ## 9) Notes for operators
 
 - `--exploit-dir` is private input only; exploit source must not be copied into `run_dir`.
