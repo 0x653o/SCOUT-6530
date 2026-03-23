@@ -1996,6 +1996,99 @@ def write_analyst_report_v2_md(report_dir: Path, report: dict[str, JsonValue]) -
     return report_path
 
 
+def _precompute_graph_layout(
+    nodes: list[dict[str, object]], edges: list[dict[str, object]],
+    *, width: int = 1000, height: int = 700, iterations: int = 150,
+) -> list[dict[str, object]]:
+    """Pre-compute force-directed graph layout in Python.
+
+    Assigns x, y coordinates to each node so the browser can render
+    without any simulation.  Pure stdlib, O(n*iterations) with cutoff.
+    """
+    import math
+    import random as _rng
+
+    _rng.seed(42)  # deterministic layout
+    n = len(nodes)
+    if n == 0:
+        return nodes
+
+    # Init positions
+    for node in nodes:
+        node["x"] = _rng.random() * width
+        node["y"] = _rng.random() * height
+        node["vx"] = 0.0
+        node["vy"] = 0.0
+
+    # Build adjacency for attraction
+    node_idx = {node["id"]: i for i, node in enumerate(nodes)}
+    edge_pairs: list[tuple[int, int]] = []
+    for e in edges:
+        si = node_idx.get(e.get("src", ""))  # type: ignore[arg-type]
+        di = node_idx.get(e.get("dst", ""))  # type: ignore[arg-type]
+        if si is not None and di is not None:
+            edge_pairs.append((si, di))
+
+    cutoff = 300.0
+    for step in range(iterations):
+        alpha = 1.0 - step / iterations
+        k = alpha * 0.5
+
+        # Repulsion (with distance cutoff)
+        for i in range(n):
+            ni = nodes[i]
+            nix = float(ni["x"])  # type: ignore[arg-type]
+            niy = float(ni["y"])  # type: ignore[arg-type]
+            for j in range(i + 1, n):
+                nj = nodes[j]
+                dx = float(nj["x"]) - nix  # type: ignore[arg-type]
+                dy = float(nj["y"]) - niy  # type: ignore[arg-type]
+                if abs(dx) > cutoff or abs(dy) > cutoff:
+                    continue
+                dist = math.sqrt(dx * dx + dy * dy) or 1.0
+                if dist > cutoff:
+                    continue
+                force = -200.0 * k / (dist * dist)
+                fx = dx / dist * force
+                fy = dy / dist * force
+                ni["vx"] = float(ni["vx"]) - fx  # type: ignore[arg-type]
+                ni["vy"] = float(ni["vy"]) - fy  # type: ignore[arg-type]
+                nj["vx"] = float(nj["vx"]) + fx  # type: ignore[arg-type]
+                nj["vy"] = float(nj["vy"]) + fy  # type: ignore[arg-type]
+
+        # Attraction
+        for si, di in edge_pairs:
+            ns = nodes[si]
+            nd = nodes[di]
+            dx = float(nd["x"]) - float(ns["x"])  # type: ignore[arg-type]
+            dy = float(nd["y"]) - float(ns["y"])  # type: ignore[arg-type]
+            dist = math.sqrt(dx * dx + dy * dy) or 1.0
+            force = (dist - 80.0) * 0.01 * k
+            fx = dx / dist * force
+            fy = dy / dist * force
+            ns["vx"] = float(ns["vx"]) + fx  # type: ignore[arg-type]
+            ns["vy"] = float(ns["vy"]) + fy  # type: ignore[arg-type]
+            nd["vx"] = float(nd["vx"]) - fx  # type: ignore[arg-type]
+            nd["vy"] = float(nd["vy"]) - fy  # type: ignore[arg-type]
+
+        # Apply velocities with damping
+        damping = 0.85
+        for node in nodes:
+            node["vx"] = float(node["vx"]) * damping  # type: ignore[arg-type]
+            node["vy"] = float(node["vy"]) * damping  # type: ignore[arg-type]
+            node["x"] = float(node["x"]) + float(node["vx"])  # type: ignore[arg-type]
+            node["y"] = float(node["y"]) + float(node["vy"])  # type: ignore[arg-type]
+
+    # Finalize: round coordinates, remove velocity fields
+    for node in nodes:
+        node["x"] = round(float(node["x"]), 1)  # type: ignore[arg-type]
+        node["y"] = round(float(node["y"]), 1)  # type: ignore[arg-type]
+        node.pop("vx", None)
+        node.pop("vy", None)
+
+    return nodes
+
+
 def write_analyst_report_v2_viewer(
     report_dir: Path, report: dict[str, JsonValue]
 ) -> Path:
@@ -2079,9 +2172,11 @@ def write_analyst_report_v2_viewer(
                         final_nodes = [n for n in trimmed_nodes if isinstance(n, dict) and n.get("id") in keep_ids]
                         if not final_nodes:
                             final_nodes = trimmed_nodes[:_GRAPH_NODE_LIMIT]
-                        # Strip nodes/edges to viewer-essential fields only
+                        # Strip nodes/edges to viewer-essential fields + pre-compute layout
                         slim_nodes = [{"id": n.get("id",""), "label": n.get("label", n.get("id","")), "type": n.get("type","")} for n in final_nodes if isinstance(n, dict)]
                         slim_edges = [{"src": e.get("src",""), "dst": e.get("dst",""), "edge_type": e.get("edge_type",""), "confidence": e.get("confidence",0)} for e in trimmed_edges if isinstance(e, dict)]
+                        # Pre-compute force-directed layout in Python (no browser simulation needed)
+                        slim_nodes = _precompute_graph_layout(slim_nodes, slim_edges)
                         gdict_trimmed: dict[str, JsonValue] = {
                             "nodes": cast(JsonValue, slim_nodes),
                             "edges": cast(JsonValue, slim_edges),
@@ -3668,9 +3763,10 @@ def write_analyst_report_v2_viewer(
             "        id: n.id,",
             "        label: n.label || n.id.split(':').pop() || '?',",
             "        type: n.type || 'unknown',",
-            "        x: Math.random() * 800 + 100,",
-            "        y: Math.random() * 500 + 50,",
+            "        x: (typeof n.x === 'number') ? n.x : Math.random() * 800 + 100,",
+            "        y: (typeof n.y === 'number') ? n.y : Math.random() * 500 + 50,",
             "        vx: 0, vy: 0,",
+            "        precomputed: (typeof n.x === 'number'),",
             "        pinned: false",
             "      };",
             "      nodeMap[n.id] = node;",
@@ -3846,9 +3942,10 @@ def write_analyst_report_v2_viewer(
             "",
             "    /* Force simulation */",
             "    var alpha = 1.0;",
-            "    var running = true;",
+            "    var hasPrecomputed = nodes.length > 0 && nodes[0].precomputed;",
+            "    var running = !hasPrecomputed;",
             "    var simSteps = 0;",
-            "    var maxSimSteps = 200;",
+            "    var maxSimSteps = hasPrecomputed ? 0 : 200;",
             "",
             "    function simulate() {",
             "      simSteps++;",
@@ -4343,25 +4440,54 @@ def write_analyst_report_v2_viewer(
             "    tbl.appendChild(tb); wrap.appendChild(tbl); mount.appendChild(wrap);",
             "  }",
             "",
-            "  /* ===== renderSbom ===== */",
+            "  /* ===== renderSbom (paginated) ===== */",
             "  function renderSbom(data) {",
             "    var pane = document.getElementById('sbom-content');",
             "    if (!pane || !data || !data.components) return;",
             "    var components = data.components || [];",
-            "    var h = document.createElement('h3'); h.textContent = 'Software Bill of Materials (' + components.length + ' components)'; pane.appendChild(h);",
-            "    var tbl = document.createElement('table'); tbl.className = 'data-table';",
-            "    var thead = document.createElement('tr');",
-            "    ['Name','Version','Type','CPE'].forEach(function(t){var th=document.createElement('th');th.textContent=t;thead.appendChild(th);}); tbl.appendChild(thead);",
-            "    components.slice(0, 100).forEach(function(c) {",
-            "      var tr = document.createElement('tr');",
-            "      [c.name||'', c.version||'', c.type||'', c.cpe||''].forEach(function(v, i) {",
-            "        var td = document.createElement('td'); td.textContent = v;",
-            "        if (i === 3) td.style.fontSize = '0.7rem';",
-            "        tr.appendChild(td);",
+            "    var total = data._viewer_trimmed || components.length;",
+            "    var h = document.createElement('h3'); h.textContent = 'Software Bill of Materials (' + total + ' components)'; pane.appendChild(h);",
+            "    var PAGE_SIZE = 30;",
+            "    var currentPage = 0;",
+            "    var totalPages = Math.ceil(components.length / PAGE_SIZE);",
+            "    var tableWrap = document.createElement('div');",
+            "    var navWrap = document.createElement('div');",
+            "    navWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin:12px 0;';",
+            "    function renderPage(page) {",
+            "      currentPage = page;",
+            "      tableWrap.innerHTML = '';",
+            "      var tbl = document.createElement('table'); tbl.className = 'data-table';",
+            "      var thead = document.createElement('tr');",
+            "      ['Name','Version','Type','CPE'].forEach(function(t){var th=document.createElement('th');th.textContent=t;thead.appendChild(th);}); tbl.appendChild(thead);",
+            "      var start = page * PAGE_SIZE;",
+            "      components.slice(start, start + PAGE_SIZE).forEach(function(c) {",
+            "        if (c._truncated) return;",
+            "        var tr = document.createElement('tr');",
+            "        [c.name||'', c.version||'', c.type||'', c.cpe||''].forEach(function(v, i) {",
+            "          var td = document.createElement('td'); td.textContent = v;",
+            "          if (i === 3) td.style.fontSize = '0.7rem';",
+            "          tr.appendChild(td);",
+            "        });",
+            "        tbl.appendChild(tr);",
             "      });",
-            "      tbl.appendChild(tr);",
-            "    });",
-            "    pane.appendChild(tbl);",
+            "      tableWrap.appendChild(tbl);",
+            "      renderNav();",
+            "    }",
+            "    function renderNav() {",
+            "      navWrap.innerHTML = '';",
+            "      var prev = document.createElement('button'); prev.textContent = 'Prev'; prev.disabled = currentPage === 0;",
+            "      prev.style.cssText = 'padding:4px 12px;border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;font-size:0.8rem;';",
+            "      prev.addEventListener('click', function() { if (currentPage > 0) renderPage(currentPage - 1); });",
+            "      var info = document.createElement('span'); info.style.cssText = 'color:var(--ink-secondary);font-size:0.8rem;';",
+            "      info.textContent = 'Page ' + (currentPage + 1) + ' / ' + totalPages + ' (' + components.length + ' shown' + (total > components.length ? ' of ' + total : '') + ')';",
+            "      var next = document.createElement('button'); next.textContent = 'Next'; next.disabled = currentPage >= totalPages - 1;",
+            "      next.style.cssText = prev.style.cssText;",
+            "      next.addEventListener('click', function() { if (currentPage < totalPages - 1) renderPage(currentPage + 1); });",
+            "      navWrap.appendChild(prev); navWrap.appendChild(info); navWrap.appendChild(next);",
+            "    }",
+            "    pane.appendChild(navWrap);",
+            "    pane.appendChild(tableWrap);",
+            "    renderPage(0);",
             "  }",
             "",
             "  /* ===== renderCve ===== */",
@@ -4381,19 +4507,38 @@ def write_analyst_report_v2_viewer(
             "      card.appendChild(label); card.appendChild(val); stats.appendChild(card);",
             "    });",
             "    pane.appendChild(stats);",
-            "    var tbl = document.createElement('table'); tbl.className = 'data-table';",
-            "    var thead = document.createElement('tr');",
-            "    ['CVE','Component','Version','CVSS','Severity'].forEach(function(t){var th=document.createElement('th');th.textContent=t;thead.appendChild(th);}); tbl.appendChild(thead);",
-            "    matches.sort(function(a,b){return (b.cvss_v3_score||0)-(a.cvss_v3_score||0);}).slice(0,50).forEach(function(m) {",
-            "      var tr = document.createElement('tr');",
-            "      [m.cve_id||'', m.component||'', m.version||'', String(m.cvss_v3_score||'N/A')].forEach(function(v) {",
-            "        var td = document.createElement('td'); td.textContent = v; tr.appendChild(td);",
+            "    matches.sort(function(a,b){return (b.cvss_v3_score||0)-(a.cvss_v3_score||0);});",
+            "    var CVE_PAGE = 20; var cvePage = 0; var cveTotalPages = Math.ceil(matches.length / CVE_PAGE);",
+            "    var cveTableWrap = document.createElement('div');",
+            "    var cveNavWrap = document.createElement('div'); cveNavWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin:12px 0;';",
+            "    function renderCvePage(page) {",
+            "      cvePage = page; cveTableWrap.innerHTML = '';",
+            "      var tbl = document.createElement('table'); tbl.className = 'data-table';",
+            "      var thead = document.createElement('tr');",
+            "      ['CVE','Component','Version','CVSS','Severity'].forEach(function(t){var th=document.createElement('th');th.textContent=t;thead.appendChild(th);}); tbl.appendChild(thead);",
+            "      matches.slice(page*CVE_PAGE, (page+1)*CVE_PAGE).forEach(function(m) {",
+            "        var tr = document.createElement('tr');",
+            "        [m.cve_id||'', m.component||'', m.version||'', String(m.cvss_v3_score||'N/A')].forEach(function(v) {",
+            "          var td = document.createElement('td'); td.textContent = v; tr.appendChild(td);",
+            "        });",
+            "        var sevTd = document.createElement('td'); sevTd.textContent = m.cvss_v3_severity||'';",
+            "        sevTd.className = 'sev-' + (m.cvss_v3_severity||'').toLowerCase(); tr.appendChild(sevTd);",
+            "        tbl.appendChild(tr);",
             "      });",
-            "      var sevTd = document.createElement('td'); sevTd.textContent = m.cvss_v3_severity||'';",
-            "      sevTd.className = 'sev-' + (m.cvss_v3_severity||'').toLowerCase(); tr.appendChild(sevTd);",
-            "      tbl.appendChild(tr);",
-            "    });",
-            "    pane.appendChild(tbl);",
+            "      cveTableWrap.appendChild(tbl);",
+            "      cveNavWrap.innerHTML = '';",
+            "      var prev = document.createElement('button'); prev.textContent = 'Prev'; prev.disabled = cvePage === 0;",
+            "      prev.style.cssText = 'padding:4px 12px;border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;font-size:0.8rem;';",
+            "      prev.addEventListener('click', function() { if (cvePage > 0) renderCvePage(cvePage - 1); });",
+            "      var info = document.createElement('span'); info.style.cssText = 'color:var(--ink-secondary);font-size:0.8rem;';",
+            "      info.textContent = 'Page ' + (cvePage+1) + ' / ' + cveTotalPages + ' (' + matches.length + ' CVEs)';",
+            "      var next = document.createElement('button'); next.textContent = 'Next'; next.disabled = cvePage >= cveTotalPages - 1;",
+            "      next.style.cssText = prev.style.cssText;",
+            "      next.addEventListener('click', function() { if (cvePage < cveTotalPages - 1) renderCvePage(cvePage + 1); });",
+            "      cveNavWrap.appendChild(prev); cveNavWrap.appendChild(info); cveNavWrap.appendChild(next);",
+            "    }",
+            "    pane.appendChild(cveNavWrap); pane.appendChild(cveTableWrap);",
+            "    renderCvePage(0);",
             "  }",
             "",
             "  /* ===== renderReach ===== */",
