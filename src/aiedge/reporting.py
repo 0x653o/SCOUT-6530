@@ -2042,8 +2042,8 @@ def write_analyst_report_v2_viewer(
 
     # Graph data bootstrap
     graph_payload: dict[str, JsonValue] = {}
-    _GRAPH_NODE_LIMIT = 250
-    _GRAPH_EDGE_LIMIT = 400
+    _GRAPH_NODE_LIMIT = 150
+    _GRAPH_EDGE_LIMIT = 250
     for gname in ("comm_graph.json", "reference_graph.json"):
         gpath = report_dir.parent / "stages" / "graph" / gname
         if gpath.is_file():
@@ -2079,9 +2079,12 @@ def write_analyst_report_v2_viewer(
                         final_nodes = [n for n in trimmed_nodes if isinstance(n, dict) and n.get("id") in keep_ids]
                         if not final_nodes:
                             final_nodes = trimmed_nodes[:_GRAPH_NODE_LIMIT]
+                        # Strip nodes/edges to viewer-essential fields only
+                        slim_nodes = [{"id": n.get("id",""), "label": n.get("label", n.get("id","")), "type": n.get("type","")} for n in final_nodes if isinstance(n, dict)]
+                        slim_edges = [{"src": e.get("src",""), "dst": e.get("dst",""), "edge_type": e.get("edge_type",""), "confidence": e.get("confidence",0)} for e in trimmed_edges if isinstance(e, dict)]
                         gdict_trimmed: dict[str, JsonValue] = {
-                            "nodes": cast(JsonValue, final_nodes),
-                            "edges": cast(JsonValue, trimmed_edges),
+                            "nodes": cast(JsonValue, slim_nodes),
+                            "edges": cast(JsonValue, slim_edges),
                             "summary": cast(JsonValue, gdict.get("summary", {})),
                             "trimmed": True,
                             "original_nodes": len(raw_nodes),
@@ -2096,28 +2099,47 @@ def write_analyst_report_v2_viewer(
         graph_payload, sort_keys=True, ensure_ascii=True
     ).replace("</", "<\\/")
 
-    # IPC / binary analysis bootstrap
+    # IPC / binary analysis bootstrap (trimmed to top 200 hits for viewer)
     ipc_payload: dict[str, JsonValue] = {}
     ba_path = report_dir.parent / "stages" / "inventory" / "binary_analysis.json"
     if ba_path.is_file():
         try:
             ba_obj = cast(object, json.loads(ba_path.read_text(encoding="utf-8")))
             if isinstance(ba_obj, dict):
-                ipc_payload = cast(dict[str, JsonValue], ba_obj)
+                ba_dict = cast(dict[str, object], ba_obj)
+                hits_raw = ba_dict.get("hits")
+                if isinstance(hits_raw, list) and len(hits_raw) > 200:
+                    ba_dict_slim: dict[str, JsonValue] = {
+                        "summary": cast(JsonValue, ba_dict.get("summary", {})),
+                        "hits": cast(JsonValue, hits_raw[:200]),
+                        "total": len(hits_raw),
+                    }
+                    ipc_payload = ba_dict_slim
+                else:
+                    ipc_payload = cast(dict[str, JsonValue], ba_obj)
         except Exception:
             pass
     ipc_bootstrap = json.dumps(
         ipc_payload, sort_keys=True, ensure_ascii=True
     ).replace("</", "<\\/")
 
-    # Source-sink graph bootstrap
+    # Source-sink graph bootstrap (trimmed to top 50 paths for viewer)
     ss_payload: dict[str, JsonValue] = {}
     ss_path = report_dir.parent / "stages" / "surfaces" / "source_sink_graph.json"
     if ss_path.is_file():
         try:
             ss_obj = cast(object, json.loads(ss_path.read_text(encoding="utf-8")))
             if isinstance(ss_obj, dict):
-                ss_payload = cast(dict[str, JsonValue], ss_obj)
+                ss_dict = cast(dict[str, object], ss_obj)
+                paths_raw = ss_dict.get("paths")
+                if isinstance(paths_raw, list) and len(paths_raw) > 50:
+                    ss_payload = {
+                        "summary": cast(JsonValue, ss_dict.get("summary", {})),
+                        "paths": cast(JsonValue, paths_raw[:50]),
+                        "total_paths": len(paths_raw),
+                    }
+                else:
+                    ss_payload = cast(dict[str, JsonValue], ss_obj)
         except Exception:
             pass
     ss_bootstrap = json.dumps(
@@ -2138,14 +2160,22 @@ def write_analyst_report_v2_viewer(
         cred_payload, sort_keys=True, ensure_ascii=True
     ).replace("</", "<\\/")
 
-    # SBOM bootstrap
+    # SBOM bootstrap (trimmed to 100 components for viewer)
     sbom_payload: dict[str, JsonValue] = {}
     sbom_path = report_dir.parent / "stages" / "sbom" / "sbom.json"
     if sbom_path.is_file():
         try:
             obj = cast(object, json.loads(sbom_path.read_text(encoding="utf-8")))
             if isinstance(obj, dict):
-                sbom_payload = cast(dict[str, JsonValue], obj)
+                sbom_dict = cast(dict[str, object], obj)
+                comps = sbom_dict.get("components")
+                if isinstance(comps, list) and len(comps) > 100:
+                    slim = dict(sbom_dict)
+                    slim["components"] = comps[:100]
+                    slim["_viewer_trimmed"] = len(comps)
+                    sbom_payload = cast(dict[str, JsonValue], slim)
+                else:
+                    sbom_payload = cast(dict[str, JsonValue], obj)
         except Exception:
             pass
     sbom_bootstrap = json.dumps(sbom_payload, sort_keys=True, ensure_ascii=True).replace("</", "<\\/")
@@ -3817,18 +3847,24 @@ def write_analyst_report_v2_viewer(
             "    /* Force simulation */",
             "    var alpha = 1.0;",
             "    var running = true;",
+            "    var simSteps = 0;",
+            "    var maxSimSteps = 200;",
             "",
             "    function simulate() {",
-            "      if (alpha < 0.001) { alpha = 0; return; }",
-            "      alpha *= 0.99;",
+            "      simSteps++;",
+            "      if (alpha < 0.005 || simSteps > maxSimSteps) { alpha = 0; running = false; return; }",
+            "      alpha *= 0.985;",
             "      var k = alpha;",
             "",
-            "      /* Repulsion (charge) */",
+            "      /* Repulsion (charge) — skip pairs beyond cutoff distance */",
+            "      var cutoff = 300;",
             "      for (var i = 0; i < nodes.length; i++) {",
             "        for (var j = i + 1; j < nodes.length; j++) {",
             "          var a = nodes[i], b = nodes[j];",
             "          var dx = b.x - a.x, dy = b.y - a.y;",
+            "          if (dx > cutoff || dx < -cutoff || dy > cutoff || dy < -cutoff) continue;",
             "          var dist = Math.sqrt(dx*dx + dy*dy) || 1;",
+            "          if (dist > cutoff) continue;",
             "          var force = -300 * k / (dist * dist);",
             "          var fx = dx / dist * force, fy = dy / dist * force;",
             "          if (!a.pinned) { a.vx -= fx; a.vy -= fy; }",
