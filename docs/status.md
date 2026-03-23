@@ -34,6 +34,22 @@
 - Credential 자동 매핑: `stages/findings/credential_mapping.json` 생성. SSH 키, 비밀번호 해시, API 토큰 → auth surface 매핑. 위험도 분류(high/medium/low).
 - Verifier reason code 개선: `dynamic_validation`에서 `isolation_verified`/`boot_verified` 생성, `poc_validation`에서 `repro_3_of_3` 생성. VERIFIED 판정 경로 활성화.
 - 인터랙티브 웹 뷰어: 글래스모피즘 다크 테마, 순수 JS force-directed 그래프, IPC Map/Source→Sink/Credential Map 패널. 파이프라인 진행률 바, 접이식 카드, 다크/라이트 토글.
+- **SBOM 생성** (`sbom.py`): CycloneDX 1.6 포맷 SBOM 자동 생성. opkg/dpkg 패키지 DB, 바이너리 버전 문자열, SO 라이브러리 버전, 커널 버전에서 컴포넌트 탐지. CPE 2.3 식별자 자동 구성. `stages/sbom/sbom.json`, `stages/sbom/cpe_index.json` 산출.
+- **CVE 스캐닝** (`cve_scan.py`): NVD API 2.0 CVE 매칭. Rate-limited (API key 유/무에 따라 10/50 req/min). SHA-256 기반 캐시 (per-run + cross-run `AIEDGE_NVD_CACHE_DIR`). Critical/High CVE → finding 후보 자동 생성. `AIEDGE_NVD_API_KEY` env var.
+- **X.509 인증서 분석** (`cert_analysis.py`): PEM/DER 인증서 스캔. 만료, 약한 키(<2048 RSA), 약한 서명(SHA-1, MD5), 자체서명, 개인키 노출 감지.
+- **Init 서비스 감사** (`init_analysis.py`): SysV, systemd, BusyBox inittab, OpenWrt procd, xinetd/inetd 파싱. telnet(HIGH), FTP/TFTP(MEDIUM), UPnP/SNMP(MEDIUM) 위험 서비스 플래그.
+- **파일 퍼미션 감사** (`fs_permissions.py`): world-writable, SUID/SGID, 민감 파일(shadow, 개인키) 과도한 권한 감지.
+- **MCP 서버** (`mcp_server.py`): JSON-RPC 2.0 over stdio, 12개 도구 노출. `./scout mcp --project-id <run_id>`. Claude Code/Desktop 등 MCP 호환 AI 에이전트에서 SCOUT 구동 가능.
+- **LLM 드라이버 확장**: `ClaudeAPIDriver` (Claude API 직접 호출, `ANTHROPIC_API_KEY`) + `OllamaDriver` (로컬 LLM, `AIEDGE_OLLAMA_URL`). `AIEDGE_LLM_DRIVER=codex|claude|ollama`. 비용 추적 (`llm_cost.py`, `AIEDGE_LLM_BUDGET_USD`).
+- **CVE Reachability 분석** (`reachability.py`): communication graph BFS로 공격 표면에서 CVE 컴포넌트까지 도달성 판정. directly_reachable(≤2 hop), potentially_reachable(3+), unreachable.
+- **펌웨어 비교** (`firmware_diff.py`): 두 run 간 파일시스템 diff(추가/삭제/수정/퍼미션), 바이너리 hardening diff, config 보안 diff.
+- **GDB RSP 클라이언트** (`emulation_gdb.py`): 순수 stdlib GDB Remote Serial Protocol 클라이언트. QEMU `-g` stub에 연결하여 레지스터/메모리 읽기, 브레이크포인트, 백트레이스.
+- **Ghidra headless 연동** (`ghidra_bridge.py`, `ghidra_analysis.py`): 선택적 Ghidra 디컴파일/xref/데이터플로우 분석. SHA-256 캐시. 미설치 시 graceful skip. `AIEDGE_GHIDRA_HOME`, `AIEDGE_GHIDRA_MAX_BINARIES`.
+- **AFL++ 퍼징 파이프라인**: `fuzz_target.py`(스코어링 0-100), `fuzz_harness.py`(딕셔너리/시드/하네스), `fuzz_campaign.py`(AFL++ Docker QEMU mode), `fuzz_triage.py`(크래시 분류/exploitability). 미설치 시 graceful skip. `AIEDGE_AFLPP_IMAGE`, `AIEDGE_FUZZ_BUDGET_S`.
+- **Executive Report 생성** (`report_export.py`): Markdown executive report 자동 생성. 파이프라인 요약, 상위 리스크, SBOM/CVE 테이블, 공격 표면, 크레덴셜 findings.
+- **웹 뷰어 UX 대폭 개선**: 싱글 패널 뷰(사이드바 클릭 → 해당 패널만 표시), KPI 바(Critical/High/Components/CVEs/Endpoints 상시 표시), SBOM/CVE/Reachability/Security Assessment 4개 패널 추가, 페이지네이션(SBOM 30/page, CVE 20/page), 그래프 Python 사전 레이아웃(150 노드 균형 선택, 호버 시 연결 정보 표시), viewer.html 1.5MB→567KB 경량화.
+- **공유 유틸리티** (`path_safety.py`): `assert_under_dir`, `rel_to_run_dir`, `sha256_file`, `sha256_text` 공유 모듈.
+- 파이프라인 29 → 34 stages: `ghidra_analysis`, `sbom`, `cve_scan`, `reachability`, `fuzzing` 추가.
 
 ## Known Issues (중요)
 
@@ -41,12 +57,14 @@
 - 다층 벤더 포맷은 재귀 SquashFS로 많이 개선되었으나, 암호화된 포맷이나 특수 커스텀 헤더는 여전히 수동 추출 필요.
   - 현재는 `--rootfs` 우회가 보완 경로이며, 포맷 전용 extractor 체인 확장은 계속 필요.
 - 바이너리 보안 속성(NX/PIE/RELRO/Canary)이 순수 Python으로 수집되며 findings 점수에 반영. 디컴파일/CFG 기반 정밀 분석 통합은 미완.
+- Ghidra/AFL++ 연동은 `stage_registry.py`에 등록되어 `--stages ghidra_analysis,fuzzing`으로 수동 실행 가능하나, `run.py` 자동 실행 순서에는 미포함. 향후 `run.py` 업데이트 필요.
+- Reachability에서 CVE 컴포넌트명과 graph 노드 ID 형식 불일치(`curl` vs `component:curl`)로 일부 `no_graph_data` 발생. 매칭 로직 개선 필요.
 
 ## 다음 우선순위
 
-1) 벤더 포맷 전용 extraction chain 확장 (QNAP/Synology/ASUS 계열 깊은 중첩 포맷)
-2) 바이너리 심층 분석: checksec 수준은 통합 완료. Ghidra headless 디컴파일 + LLM 분석 연계가 다음 목표
-3) FirmAE 호환 펌웨어 커버리지 확대 (Tier 1 에뮬레이션 성공률 향상)
-4) (오케스트레이터 레이어) tribunal/judge + validator evidence를 통한 confirmed 승격 정책 E2E 강화
-5) IPC 경로 자동 exploit 후보 연계: `source_sink_graph.json` 고신뢰 경로를 exploit_candidates에 자동 승격
-6) Credential 매핑 결과를 verified_chain 증거 번들에 통합
+1) `run.py`에 신규 스테이지(sbom, cve_scan, reachability, ghidra_analysis, fuzzing) 자동 실행 순서 통합
+2) Reachability 컴포넌트-노드 ID 매칭 로직 개선 (CPE 이름 → graph 노드 ID 정규화)
+3) 벤더 포맷 전용 extraction chain 확장 (QNAP/Synology/ASUS 계열 깊은 중첩 포맷)
+4) FirmAE 호환 펌웨어 커버리지 확대 (Tier 1 에뮬레이션 성공률 향상)
+5) Ghidra dataflow 결과를 source-sink 그래프와 findings confidence에 통합
+6) 퍼징 크래시를 exploit_autopoc PoC seed로 자동 연계

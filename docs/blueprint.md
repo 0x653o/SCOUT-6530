@@ -38,16 +38,26 @@ flowchart TD
   ext --> st[structure]
   st --> car[carving]
   car --> prof[firmware_profile]
-  prof --> inv[inventory]
-  inv --> surf[surfaces/endpoints/graph/attack_surface]
+  prof --> inv[inventory + cert/init/fs 분석]
+  inv --> ghidra[ghidra_analysis 선택적]
+  inv --> sbom[SBOM CycloneDX 1.6]
+  sbom --> cve[CVE Scan NVD API]
+  cve --> reach[Reachability BFS]
+  reach --> surf[surfaces/endpoints/graph/attack_surface]
   surf --> webui[web_ui scan]
   webui --> find[findings]
-  find --> triage[llm_triage (LLM 보안 컨텍스트 기반 우선순위)]
-  triage --> judge[tribunal/judge (LLM-as-judge)]
-  judge --> val[validator (dyn evidence, 3-tier: FirmAE/QEMU user-mode/rootfs)]
+  find --> triage[llm_triage]
+  triage --> judge[tribunal/judge LLM-as-judge]
+  judge --> val[validator 3-tier + GDB + Fuzzing]
   val --> conf[confirmed]
   val --> hc[high_confidence_static]
 ```
+
+### MCP Server
+
+- `./scout mcp --project-id <run_id>` — stdio 기반 MCP 서버
+- 12개 도구: scout_analyze, scout_stage_status, scout_read_artifact, scout_list_findings, scout_sbom, scout_cve_lookup, scout_binary_info, scout_attack_surface, scout_graph, scout_run_stage, scout_list_runs, scout_cert_analysis
+- Claude Code, Claude Desktop 등 MCP 호환 AI 에이전트에서 SCOUT 파이프라인을 자율 구동 가능
 
 ## 산출물(Artifacts) 계약
 

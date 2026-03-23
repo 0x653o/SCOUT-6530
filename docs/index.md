@@ -34,3 +34,27 @@
 - `docs/aiedge_firmware_artifacts_v1.md`
 - `docs/aiedge_report_contract.md`
 - `docs/aiedge_duplicate_gate_contract.md`
+
+## 5) 신규 기능 문서 (Phase 1-5 업그레이드)
+
+- **SBOM/CVE**: `sbom.py` → CycloneDX 1.6, `cve_scan.py` → NVD API 2.0 CVE 매칭
+- **보안 평가**: `cert_analysis.py` (X.509), `init_analysis.py` (부트 서비스), `fs_permissions.py` (퍼미션)
+- **MCP 서버**: `mcp_server.py` — 12개 도구 stdio 서버, AI 에이전트 연동
+- **LLM 드라이버**: `llm_driver.py` — Codex + Claude API + Ollama, `llm_cost.py` 비용 추적
+- **Reachability**: `reachability.py` — CVE 도달성 BFS 분석
+- **펌웨어 비교**: `firmware_diff.py` — 파일시스템/바이너리/config 3단계 diff
+- **GDB 에뮬레이션**: `emulation_gdb.py` — 순수 stdlib GDB RSP 클라이언트
+- **Ghidra 연동**: `ghidra_bridge.py` + `ghidra_analysis.py` — 선택적 디컴파일
+- **퍼징**: `fuzz_target.py` + `fuzz_harness.py` + `fuzz_campaign.py` + `fuzz_triage.py` — AFL++ 파이프라인
+- **리포트**: `report_export.py` — Markdown executive report 생성
+
+## 6) 파이프라인 (34 stages)
+
+```
+tooling → extraction → structure → carving → firmware_profile → inventory
+→ ghidra_analysis → sbom → cve_scan → reachability
+→ endpoints → surfaces → web_ui → graph → attack_surface
+→ functional_spec → threat_model → findings → llm_triage → llm_synthesis
+→ attribution → emulation → dynamic_validation → fuzzing
+→ exploit_gate → exploit_chain → exploit_autopoc → poc_validation → exploit_policy
+```

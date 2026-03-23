@@ -141,6 +141,73 @@ Copy/link behavior:
 
 ---
 
+## Card 6: SBOM Panel
+
+Purpose: Answer "어떤 소프트웨어 컴포넌트가 펌웨어에 포함되어 있는가?"
+
+| Field | Primary source | Fallback | JSON key paths | Empty state |
+|------|-----------------|----------|----------------|------------|
+| Component list | `stages/sbom/sbom.json` | none | `components[]` (name, version, purl, cpe) | `[]` — SBOM stage not run or no components found |
+| CPE index | `stages/sbom/cpe_index.json` | none | `cpe_index{}` (cpe → component mapping) | `{}` |
+| Component count | `stages/sbom/sbom.json` | none | `metadata.component_count` | `0` |
+
+Display notes:
+- 페이지네이션: 30 components/page
+- 각 컴포넌트에 CPE 2.3 식별자 표시 (CVE Scan 패널과 교차 참조 가능)
+
+---
+
+## Card 7: CVE Scan Panel
+
+Purpose: Answer "어떤 CVE가 이 펌웨어 컴포넌트에 적용되는가?"
+
+| Field | Primary source | Fallback | JSON key paths | Empty state |
+|------|-----------------|----------|----------------|------------|
+| CVE matches | `stages/cve_scan/cve_matches.json` | none | `matches[]` (cve_id, severity, score, component, description) | `[]` — CVE scan not run or no matches |
+| Severity stats | `stages/cve_scan/cve_matches.json` | none | `summary.critical`, `summary.high`, `summary.medium`, `summary.low` | `0` for each |
+| Finding candidates | `stages/cve_scan/finding_candidates.json` | none | `candidates[]` (critical/high CVEs auto-promoted) | `[]` |
+
+Display notes:
+- 페이지네이션: 20 CVEs/page
+- severity 스탯 카드 (Critical/High/Medium/Low) 상시 표시
+- Critical/High CVE는 finding 후보로 자동 생성됨을 표시
+
+---
+
+## Card 8: Reachability Panel
+
+Purpose: Answer "CVE 컴포넌트가 공격 표면에서 실제로 도달 가능한가?"
+
+| Field | Primary source | Fallback | JSON key paths | Empty state |
+|------|-----------------|----------|----------------|------------|
+| Reachability results | `stages/reachability/reachability.json` | none | `results[]` (component, cve_id, reachability, hop_count, path) | `[]` — reachability stage not run |
+| Stats | `stages/reachability/reachability.json` | none | `summary.directly_reachable`, `summary.potentially_reachable`, `summary.unreachable`, `summary.no_graph_data` | `0` for each |
+
+Display notes:
+- 도달성 스탯 카드: directly_reachable(≤2 hop), potentially_reachable(3+ hop), unreachable, no_graph_data
+- 컴포넌트 테이블에 hop count 및 경로 표시
+- `no_graph_data`는 CVE 컴포넌트명과 graph 노드 ID 불일치로 인한 미매칭 (known limitation)
+
+---
+
+## Card 9: Security Assessment Panel
+
+Purpose: Answer "인증서/부트 서비스/파일 퍼미션 보안 상태는 어떤가?"
+
+| Field | Primary source | Fallback | JSON key paths | Empty state |
+|------|-----------------|----------|----------------|------------|
+| Certificate findings | `stages/inventory/cert_analysis.json` | none | `findings[]` (type, path, severity, detail) | `[]` — no certs found or analysis not run |
+| Init service findings | `stages/inventory/init_services.json` | none | `findings[]` (service, init_system, severity, detail) | `[]` |
+| Permission findings | `stages/inventory/fs_permissions.json` | none | `findings[]` (path, issue_type, severity, mode) | `[]` |
+| Combined severity summary | derived from above | none | count by severity across all three sources | `0` |
+
+Display notes:
+- 인증서(X.509), 부트 서비스, 퍼미션 3개 서브섹션 통합 표시
+- 각 서브섹션별 severity 태그 (HIGH/MEDIUM/LOW) 표시
+- telnet/FTP 등 HIGH 위험 서비스는 강조 표시
+
+---
+
 ## Real ER Run Example (Concrete Values)
 
 Run: `aiedge-runs/2026-02-17_1041_sha256-e3d3fe0697bc/`
