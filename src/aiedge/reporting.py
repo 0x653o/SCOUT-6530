@@ -1998,7 +1998,7 @@ def write_analyst_report_v2_md(report_dir: Path, report: dict[str, JsonValue]) -
 
 def _precompute_graph_layout(
     nodes: list[dict[str, object]], edges: list[dict[str, object]],
-    *, width: int = 1000, height: int = 700, iterations: int = 150,
+    *, width: int = 2000, height: int = 1400, iterations: int = 200,
 ) -> list[dict[str, object]]:
     """Pre-compute force-directed graph layout in Python.
 
@@ -2029,12 +2029,13 @@ def _precompute_graph_layout(
         if si is not None and di is not None:
             edge_pairs.append((si, di))
 
-    cutoff = 300.0
+    cutoff = 500.0
+    min_dist = 40.0  # prevent overlap
     for step in range(iterations):
         alpha = 1.0 - step / iterations
-        k = alpha * 0.5
+        k = alpha * 0.6
 
-        # Repulsion (with distance cutoff)
+        # Repulsion (with distance cutoff + minimum distance enforcement)
         for i in range(n):
             ni = nodes[i]
             nix = float(ni["x"])  # type: ignore[arg-type]
@@ -2048,7 +2049,11 @@ def _precompute_graph_layout(
                 dist = math.sqrt(dx * dx + dy * dy) or 1.0
                 if dist > cutoff:
                     continue
-                force = -200.0 * k / (dist * dist)
+                # Strong repulsion at close range to prevent overlap
+                effective_dist = max(dist, 1.0)
+                force = -800.0 * k / (effective_dist * effective_dist)
+                if dist < min_dist:
+                    force *= 3.0  # extra push for overlapping nodes
                 fx = dx / dist * force
                 fy = dy / dist * force
                 ni["vx"] = float(ni["vx"]) - fx  # type: ignore[arg-type]
@@ -2063,7 +2068,7 @@ def _precompute_graph_layout(
             dx = float(nd["x"]) - float(ns["x"])  # type: ignore[arg-type]
             dy = float(nd["y"]) - float(ns["y"])  # type: ignore[arg-type]
             dist = math.sqrt(dx * dx + dy * dy) or 1.0
-            force = (dist - 80.0) * 0.01 * k
+            force = (dist - 150.0) * 0.008 * k
             fx = dx / dist * force
             fy = dy / dist * force
             ns["vx"] = float(ns["vx"]) + fx  # type: ignore[arg-type]
