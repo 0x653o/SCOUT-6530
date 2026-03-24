@@ -9,7 +9,7 @@
 
 ## Build, Test, and Development Commands
 - `./scout --help` — list CLI entry points.
-- `./scout analyze <firmware.bin> --ack-authorization --no-llm --case-id <id> --stages tooling,extraction,structure,carving,firmware_profile,inventory` — run deterministic analysis.
+- `./scout analyze <firmware.bin> --no-llm --stages tooling,extraction,structure,carving,firmware_profile,inventory` — run deterministic analysis (subset of stages).
 - `./scout stages aiedge-runs/<run_id> --stages <comma-list>` — rerun selected stages on an existing run.
 - `pytest -q` — run the full test suite.
 - `pytest -q tests/test_cli_tui.py` — run a focused test module.

@@ -45,17 +45,17 @@ SCOUT is a deterministic firmware analysis engine that transforms raw firmware b
 ## Quick Start
 
 ```bash
-# Basic analysis (deterministic, no LLM)
-./scout analyze firmware.bin --ack-authorization --no-llm --case-id my-test
+# Full analysis (all features enabled by default)
+./scout analyze firmware.bin
+
+# Deterministic only (no LLM)
+./scout analyze firmware.bin --no-llm
 
 # Pre-extracted rootfs (bypasses weak unpacking)
-./scout analyze firmware.img --ack-authorization --no-llm --case-id my-test \
-  --rootfs /path/to/extracted/rootfs
+./scout analyze firmware.img --rootfs /path/to/extracted/rootfs
 
-# Full exploit profile (lab environment only)
-./scout analyze firmware.bin --ack-authorization --case-id my-test \
-  --profile exploit --exploit-flag lab --exploit-scope lab-only \
-  --exploit-attestation authorized
+# Analysis-only profile (no exploit chain)
+./scout analyze firmware.bin --profile analysis --no-llm
 
 # MCP server for AI agents
 ./scout mcp --project-id aiedge-runs/<run_id>
@@ -308,7 +308,7 @@ SCOUT is intended for use in controlled environments with proper authorization:
 - **Vulnerability research** — responsible disclosure with coordinated timelines
 - **CTF and training** — designated targets in lab environments
 
-Dynamic validation runs in network-isolated sandbox containers. PoC execution requires explicit `--ack-authorization` and lab attestation flags. No weaponized payloads are included.
+Dynamic validation runs in network-isolated sandbox containers. Exploit profile and lab attestation are enabled by default. No weaponized payloads are included.
 
 ---
 

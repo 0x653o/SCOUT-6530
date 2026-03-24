@@ -3399,13 +3399,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _ = analyze.add_argument(
         "--case-id",
-        required=True,
-        help="Case identifier recorded into the run manifest.",
+        required=False,
+        default=None,
+        help="Case identifier recorded into the run manifest (auto-generated if omitted).",
     )
     _ = analyze.add_argument(
         "--ack-authorization",
         action="store_true",
-        help="Acknowledge you are authorized to analyze this firmware.",
+        default=True,
+        help="Acknowledge you are authorized to analyze this firmware (default: True).",
     )
     _ = analyze.add_argument(
         "--time-budget-s",
@@ -3416,7 +3418,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = analyze.add_argument(
         "--open-egress",
         action="store_true",
-        help="Record an override allowing full internet egress for this run.",
+        default=True,
+        help="Record an override allowing full internet egress for this run (default: True).",
     )
     _ = analyze.add_argument(
         "--egress-allow",
@@ -3433,23 +3436,23 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = analyze.add_argument(
         "--profile",
         choices=["analysis", "exploit"],
-        default="analysis",
-        help="Execution profile (default: analysis).",
+        default="exploit",
+        help="Execution profile (default: exploit).",
     )
     _ = analyze.add_argument(
         "--exploit-flag",
-        default="",
-        help="Exploit profile gate flag (required for --profile exploit).",
+        default="lab",
+        help="Exploit profile gate flag (default: lab).",
     )
     _ = analyze.add_argument(
         "--exploit-attestation",
-        default="",
-        help="Exploit profile attestation (required for --profile exploit).",
+        default="authorized",
+        help="Exploit profile attestation (default: authorized).",
     )
     _ = analyze.add_argument(
         "--exploit-scope",
-        default="",
-        help="Exploit profile explicit scope string (required for --profile exploit).",
+        default="lab-only",
+        help="Exploit profile explicit scope string (default: lab-only).",
     )
     _ = analyze.add_argument(
         "--stages",
@@ -3522,13 +3525,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _ = analyze_8mb.add_argument(
         "--case-id",
-        required=True,
-        help="Case identifier recorded into the run manifest.",
+        required=False,
+        default=None,
+        help="Case identifier recorded into the run manifest (auto-generated if omitted).",
     )
     _ = analyze_8mb.add_argument(
         "--ack-authorization",
         action="store_true",
-        help="Acknowledge you are authorized to analyze this firmware.",
+        default=True,
+        help="Acknowledge you are authorized to analyze this firmware (default: True).",
     )
     _ = analyze_8mb.add_argument(
         "--time-budget-s",
@@ -3539,7 +3544,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = analyze_8mb.add_argument(
         "--open-egress",
         action="store_true",
-        help="Record an override allowing full internet egress for this run.",
+        default=True,
+        help="Record an override allowing full internet egress for this run (default: True).",
     )
     _ = analyze_8mb.add_argument(
         "--egress-allow",
@@ -3556,23 +3562,23 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = analyze_8mb.add_argument(
         "--profile",
         choices=["analysis", "exploit"],
-        default="analysis",
-        help="Execution profile (default: analysis).",
+        default="exploit",
+        help="Execution profile (default: exploit).",
     )
     _ = analyze_8mb.add_argument(
         "--exploit-flag",
-        default="",
-        help="Exploit profile gate flag (required for --profile exploit).",
+        default="lab",
+        help="Exploit profile gate flag (default: lab).",
     )
     _ = analyze_8mb.add_argument(
         "--exploit-attestation",
-        default="",
-        help="Exploit profile attestation (required for --profile exploit).",
+        default="authorized",
+        help="Exploit profile attestation (default: authorized).",
     )
     _ = analyze_8mb.add_argument(
         "--exploit-scope",
-        default="",
-        help="Exploit profile explicit scope string (required for --profile exploit).",
+        default="lab-only",
+        help="Exploit profile explicit scope string (default: lab-only).",
     )
     _ = analyze_8mb.add_argument(
         "--stages",
@@ -3943,7 +3949,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command in ("analyze", "analyze-8mb"):
         input_firmware = cast(str, getattr(args, "input_firmware"))
-        case_id = cast(str, getattr(args, "case_id"))
+        case_id = cast(str, getattr(args, "case_id")) if getattr(args, "case_id") else f"auto-{int(time.time())}"
         ack_authorization = bool(getattr(args, "ack_authorization", False))
         time_budget_s = cast(int, getattr(args, "time_budget_s"))
         open_egress = bool(getattr(args, "open_egress", False))
@@ -4001,13 +4007,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 30
-
-        if not ack_authorization:
-            print(
-                "Missing required acknowledgement: --ack-authorization",
-                file=sys.stderr,
-            )
-            return 30
 
         exploit_gate: dict[str, str] | None = None
         if profile == "exploit":

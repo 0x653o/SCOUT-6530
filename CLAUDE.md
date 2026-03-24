@@ -14,26 +14,27 @@ SCOUT (AIEdge) is a deterministic firmware-to-exploit evidence engine. It takes 
 # CLI help
 ./scout --help
 
+# Full analysis (all features enabled by default)
+./scout analyze firmware.bin
+
 # Deterministic analysis (no LLM)
-./scout analyze firmware.bin --ack-authorization --no-llm --case-id <id>
+./scout analyze firmware.bin --no-llm
 
 # With specific stages
-./scout analyze firmware.bin --ack-authorization --no-llm --case-id <id> \
+./scout analyze firmware.bin --no-llm \
   --stages tooling,extraction,structure,carving,firmware_profile,inventory
 
 # Pre-extracted rootfs bypass (when extraction is weak)
-./scout analyze firmware.img --ack-authorization --no-llm --case-id <id> \
-  --rootfs /path/to/extracted/rootfs
+./scout analyze firmware.img --no-llm --rootfs /path/to/extracted/rootfs
 
 # 8MB canonical track (truncated input for quick profiling)
-./scout analyze-8mb firmware.bin --ack-authorization --no-llm --case-id <id>
+./scout analyze-8mb firmware.bin --no-llm
 
 # Rerun specific stages on existing run
 ./scout stages aiedge-runs/<run_id> --no-llm --stages inventory
 
-# Full exploit profile (requires authorization flags)
-./scout analyze firmware.bin --ack-authorization --case-id <id> \
-  --profile exploit --exploit-flag lab --exploit-attestation authorized --exploit-scope lab-only
+# Full exploit profile (enabled by default)
+./scout analyze firmware.bin
 
 # Run tests
 pytest -q                                        # full suite

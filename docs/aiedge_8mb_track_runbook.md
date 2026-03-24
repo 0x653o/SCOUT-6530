@@ -15,7 +15,6 @@ This runbook describes the canonical 8MB firmware track used for deterministic e
 ./scout analyze-8mb \
   /home/rootk1m/SCOUT/aiedge-runs/2026-02-12_1633_sha256-387d97fd9251/input/firmware.bin \
   --case-id 8mb-analysis \
-  --ack-authorization \
   --no-llm
 ```
 또는 직접 실행:
@@ -24,7 +23,6 @@ This runbook describes the canonical 8MB firmware track used for deterministic e
 PYTHONPATH=/home/rootk1m/SCOUT/src python3 -m aiedge analyze-8mb \
   /home/rootk1m/SCOUT/aiedge-runs/2026-02-12_1633_sha256-387d97fd9251/input/firmware.bin \
   --case-id 8mb-analysis \
-  --ack-authorization \
   --no-llm
 ```
 
@@ -48,18 +46,13 @@ python3 -m pip install ubidump
 
 ## Exploit Profile (Lab-Gated)
 
-Exploit profile requires explicit gate fields.
+Exploit profile is now the default. Gate fields (`--exploit-flag lab`, `--exploit-attestation authorized`, `--exploit-scope lab-only`) are pre-configured.
 
 ```bash
 ./scout analyze-8mb \
   /home/rootk1m/SCOUT/aiedge-runs/2026-02-12_1633_sha256-387d97fd9251/input/firmware.bin \
   --case-id 8mb-exploit \
-  --ack-authorization \
   --no-llm \
-  --profile exploit \
-  --exploit-flag flag \
-  --exploit-attestation authorized \
-  --exploit-scope lab-only \
   --stages exploit_gate,exploit_chain,exploit_policy
 ```
 또는 직접 실행:
@@ -69,12 +62,7 @@ PYTHONPATH=/home/rootk1m/SCOUT/src \
 python3 -m aiedge analyze-8mb \
   /home/rootk1m/SCOUT/aiedge-runs/2026-02-12_1633_sha256-387d97fd9251/input/firmware.bin \
   --case-id 8mb-exploit \
-  --ack-authorization \
   --no-llm \
-  --profile exploit \
-  --exploit-flag flag \
-  --exploit-attestation authorized \
-  --exploit-scope lab-only \
   --stages exploit_gate,exploit_chain,exploit_policy
 ```
 

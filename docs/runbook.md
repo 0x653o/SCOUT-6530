@@ -6,12 +6,7 @@ Use the bundled launcher to run commands with short flags:
 
 ```bash
 ./scout analyze /path/to/ER-e50.v3.0.1.bin \
-  --case-id er-e50-v3.0.1-verified-chain \
-  --ack-authorization \
-  --profile exploit \
-  --exploit-flag lab \
-  --exploit-attestation authorized \
-  --exploit-scope lab-only
+  --case-id er-e50-v3.0.1-verified-chain
 ```
 
 The analyze command prints the generated run_dir path. Use that value as `<run_dir>` in all commands below.
@@ -21,7 +16,6 @@ If extraction quality is low for your target format (few files, wrong OS guess),
 ```bash
 ./scout analyze /path/to/qnap.img \
   --case-id qnap-manual-rootfs \
-  --ack-authorization \
   --no-llm \
   --rootfs /path/to/extracted/rootfs
 ```
