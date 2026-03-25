@@ -280,7 +280,7 @@ def test_extraction_stage_manual_rootfs_tolerates_special_entries(tmp_path: Path
 
 def test_recursive_squashfs_extracts_nested_layers(tmp_path, monkeypatch):
     """When unsquashfs produces output containing another SquashFS, it is recursively extracted."""
-    from aiedge.extraction import _recursive_nested_extraction, _SQUASHFS_MAGICS
+    from aiedge.extraction import _recursive_nested_extraction
 
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stages" / "extraction"
@@ -342,7 +342,7 @@ def test_recursive_squashfs_extracts_nested_layers(tmp_path, monkeypatch):
 
 def test_recursive_squashfs_depth_limit(tmp_path, monkeypatch):
     """SquashFS recursion stops at _SQUASHFS_EXTRACT_MAX_DEPTH."""
-    from aiedge.extraction import _recursive_nested_extraction, _SQUASHFS_EXTRACT_MAX_DEPTH
+    from aiedge.extraction import _SQUASHFS_EXTRACT_MAX_DEPTH, _recursive_nested_extraction
 
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stages" / "extraction"

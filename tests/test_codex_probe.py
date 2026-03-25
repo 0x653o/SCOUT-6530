@@ -1,6 +1,6 @@
 from __future__ import annotations
-# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUnknownArgumentType=false
 
+# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUnknownArgumentType=false
 import json
 import subprocess
 from collections.abc import Sequence

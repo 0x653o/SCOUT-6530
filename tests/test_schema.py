@@ -6,8 +6,8 @@ from typing import cast
 
 import pytest
 
-from aiedge.run import analyze_run, create_run
 from aiedge.policy import AIEdgePolicyViolation
+from aiedge.run import analyze_run, create_run
 from aiedge.schema import REPORT_SCHEMA_VERSION, empty_report, validate_report
 
 

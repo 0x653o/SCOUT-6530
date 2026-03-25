@@ -3,12 +3,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import cast
 from unittest.mock import patch
 
-import pytest
-
-from aiedge.llm_driver import LLMDriverResult, ModelTier
+from aiedge.llm_driver import LLMDriverResult
 from aiedge.llm_triage import (
     LLMTriageStage,
     _build_triage_prompt,

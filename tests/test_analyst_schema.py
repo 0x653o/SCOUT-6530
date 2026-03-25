@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 from aiedge.schema import (
     ANALYST_REPORT_SCHEMA_VERSION,
     empty_analyst_report,

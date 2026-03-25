@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-from aiedge.binary_hardening import ELFHardening, parse_elf_hardening
+from aiedge.binary_hardening import parse_elf_hardening
 
 
 def _build_elf(

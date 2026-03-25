@@ -5,7 +5,6 @@ from typing import cast
 
 from aiedge.schema import ANALYST_DIGEST_SCHEMA_VERSION, validate_analyst_digest
 
-
 _SHA256 = "a" * 64
 _SHA256_B = "b" * 64
 

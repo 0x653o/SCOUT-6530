@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,7 +14,6 @@ from aiedge.terminator_feedback import (
     generate_feedback_request,
     load_feedback_registry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -15,7 +15,6 @@ from aiedge.path_safety import (
 )
 from aiedge.policy import AIEdgePolicyViolation
 
-
 # ---------------------------------------------------------------------------
 # assert_under_dir
 # ---------------------------------------------------------------------------

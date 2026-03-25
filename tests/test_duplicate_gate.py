@@ -6,8 +6,7 @@ from typing import cast
 
 import pytest
 
-from aiedge.duplicate_gate import DUPLICATE_GATE_ANALYSIS_FAIL_OPEN
-from aiedge.duplicate_gate import apply_duplicate_gate
+from aiedge.duplicate_gate import DUPLICATE_GATE_ANALYSIS_FAIL_OPEN, apply_duplicate_gate
 from aiedge.fingerprinting import claim_fingerprint_sha256
 from aiedge.run import RunInfo, analyze_run, create_run
 from aiedge.schema import JsonValue

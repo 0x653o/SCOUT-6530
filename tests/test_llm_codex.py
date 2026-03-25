@@ -1,6 +1,6 @@
 from __future__ import annotations
-# pyright: reportMissingImports=false
 
+# pyright: reportMissingImports=false
 import json
 import os
 from pathlib import Path

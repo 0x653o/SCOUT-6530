@@ -8,7 +8,6 @@ import aiedge.reporting as reporting
 from aiedge.run import analyze_run, create_run
 from aiedge.schema import JsonValue
 
-
 BuildV2 = Callable[[dict[str, object]], dict[str, object]]
 
 

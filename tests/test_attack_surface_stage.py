@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
 from pathlib import Path
 from typing import Protocol, cast
 
-from aiedge.confidence_caps import EVIDENCE_LEVELS, STATIC_ONLY_CAP
 from aiedge.attack_surface import (
     ATTACK_SURFACE_BENCHMARK_FIXTURE_RELATIVE_PATH,
     ATTACK_SURFACE_METRICS_RELATIVE_PATH,
     AttackSurfaceStage,
 )
+from aiedge.confidence_caps import EVIDENCE_LEVELS, STATIC_ONLY_CAP
 from aiedge.run import create_run, run_subset
 from aiedge.stage import StageContext
 

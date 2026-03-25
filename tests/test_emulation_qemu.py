@@ -1,15 +1,12 @@
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false
 from __future__ import annotations
 
-import struct
 import subprocess
 from pathlib import Path
-from typing import cast
 
 import pytest
 
 from aiedge.emulation_qemu import (
-    QemuUserResult,
     detect_rootfs_arch,
     execute_binary,
     execute_service_probes,

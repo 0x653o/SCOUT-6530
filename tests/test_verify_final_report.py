@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from typing import cast
 
-
 _CANONICAL_SHA256 = "387d97fd925125471691d5c565fcc0ff009e111bdbdfd2ddb057f9212a939c8a"
 
 

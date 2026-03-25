@@ -4,14 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from aiedge.stage import StageContext
 from aiedge.web_ui import (
     WebUiStage,
-    _find_api_spec_files,
-    _find_web_content_roots,
-    _iter_web_files,
     _scan_html_file,
     _scan_js_file,
 )
@@ -50,7 +45,7 @@ class TestWebUiStage:
         js_file.write_text("var x = fetch('/api/cmd');\n" + "doc" + "ument." + "write('<b>hi</b>');")
         ctx = _make_ctx(run_dir)
         stage = WebUiStage()
-        outcome = stage.run(ctx)
+        stage.run(ctx)
         out = json.loads((run_dir / "stages" / "web_ui" / "web_ui.json").read_text())
         patterns = [h["pattern"] for h in out["js_security_patterns"]]
         assert "fetch_call" in patterns
@@ -64,7 +59,7 @@ class TestWebUiStage:
         html_file.write_text('<form action="/cgi-bin/exec.cgi" method="POST"><input name="cmd"></form>')
         ctx = _make_ctx(run_dir)
         stage = WebUiStage()
-        outcome = stage.run(ctx)
+        stage.run(ctx)
         out = json.loads((run_dir / "stages" / "web_ui" / "web_ui.json").read_text())
         patterns = [h["pattern"] for h in out["html_security_patterns"]]
         assert "form_action" in patterns
@@ -78,7 +73,7 @@ class TestWebUiStage:
         (www / "swagger.json").write_text('{"swagger": "2.0"}')
         ctx = _make_ctx(run_dir)
         stage = WebUiStage()
-        outcome = stage.run(ctx)
+        stage.run(ctx)
         out = json.loads((run_dir / "stages" / "web_ui" / "web_ui.json").read_text())
         assert out["summary"]["api_specs_found"] >= 1
         spec_names = [s["name"] for s in out["api_spec_files"]]
@@ -91,7 +86,7 @@ class TestWebUiStage:
         (www / "test.js").write_text("fetch('/api')")
         ctx = _make_ctx(run_dir)
         stage = WebUiStage()
-        outcome = stage.run(ctx)
+        stage.run(ctx)
         out_text = (run_dir / "stages" / "web_ui" / "web_ui.json").read_text()
         run_dir_str = str(run_dir.resolve())
         assert run_dir_str not in out_text

@@ -1,10 +1,7 @@
 """Tests for symlink containment guards preventing host FS leakage."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
-
-import pytest
 
 
 def _make_run_dir(tmp_path: Path) -> Path:

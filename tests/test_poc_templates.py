@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from typing import cast
-
 from aiedge.poc_templates import (
-    PoCContext,
-    PoCTemplate,
     _REGISTRY,
+    PoCContext,
     list_templates,
-    register_template,
     select_template,
 )
 

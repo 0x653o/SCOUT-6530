@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
