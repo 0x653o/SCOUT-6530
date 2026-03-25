@@ -256,6 +256,15 @@ Firmware --> Unpack --> Profile --> Inventory --> [Ghidra] --> SBOM --> CVE Scan
 | `AIEDGE_CVE_SCAN_MAX_COMPONENTS` | `50` | CVE 스캔 대상 최대 컴포넌트 수 |
 | `AIEDGE_CVE_SCAN_TIMEOUT_S` | `30` | NVD API 요청당 타임아웃 |
 
+### LLM 타임아웃
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `AIEDGE_LLM_CHAIN_TIMEOUT_S` | `180` | LLM 합성 타임아웃 |
+| `AIEDGE_LLM_CHAIN_MAX_ATTEMPTS` | `5` | LLM 합성 최대 재시도 |
+| `AIEDGE_AUTOPOC_LLM_TIMEOUT_S` | `180` | Auto-PoC LLM 타임아웃 |
+| `AIEDGE_AUTOPOC_LLM_MAX_ATTEMPTS` | `4` | Auto-PoC 최대 재시도 |
+
 ### Ghidra
 
 | 변수 | 기본값 | 설명 |
@@ -279,6 +288,15 @@ Firmware --> Unpack --> Profile --> Inventory --> [Ghidra] --> SBOM --> CVE Scan
 | `AIEDGE_EMULATION_IMAGE` | `scout-emulation:latest` | Tier 1 Docker 이미지 |
 | `AIEDGE_FIRMAE_ROOT` | `/opt/FirmAE` | FirmAE 설치 경로 |
 | `AIEDGE_QEMU_GDB_PORT` | `1234` | QEMU GDB 원격 포트 |
+
+### MCP & 포트 스캐닝
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `AIEDGE_MCP_MAX_OUTPUT_KB` | `512` | MCP 응답 최대 크기 |
+| `AIEDGE_PORTSCAN_TOP_K` | `1000` | 스캔 대상 상위 K개 포트 |
+| `AIEDGE_PORTSCAN_WORKERS` | `128` | 동시 스캔 워커 수 |
+| `AIEDGE_PORTSCAN_BUDGET_S` | `120` | 포트 스캔 시간 예산 |
 
 ### Quality Gate 오버라이드
 
