@@ -53,6 +53,29 @@
 - **공유 유틸리티** (`path_safety.py`): `assert_under_dir`, `rel_to_run_dir`, `sha256_file`, `sha256_text` 공유 모듈.
 - 파이프라인 29 → 34 stages: `ghidra_analysis`, `sbom`, `cve_scan`, `reachability`, `fuzzing` 추가.
 
+## 최근 개선 (2026-03)
+
+### Phase 1: 버그 수정
+- **Exploit stage import 격리** (`run.py`): 5개 exploit stage를 단일 try/except에서 개별 try/except ImportError 블록으로 분리. 각 stage 실패가 독립적으로 limitation에 기록됨. GhidraAnalysisStage() 직접 호출 버그 수정 (make_ghidra_analysis_stage factory 사용).
+- **Duplicate gate 파일 잠금** (`duplicate_gate.py`): read-modify-write 사이클에 `fcntl.flock()` advisory lock 추가. 동시 실행 시 데이터 손실 방지.
+- **LLM driver 미인식 이름 경고** (`llm_driver.py`): `AIEDGE_LLM_DRIVER`에 미인식 값이 설정될 경우 stderr 경고 출력.
+
+### Phase 2: 증거 체인 무결성
+- **Findings stage SHA-256 매니페스트** (`run.py`): `_write_findings_manifest()`가 `stages/findings/stage.json`에 SHA-256 해시 포함 매니페스트 생성. Handoff 번들에서 하드코딩된 `"status": "ok"` 제거.
+- **Firmware handoff 유효성 검증** (`schema.py` + `run.py`): `validate_handoff()`가 `firmware_handoff.json` 기록 전 필수 키를 검증.
+- **파이프라인 후 실패 기록** (`run.py`): SARIF, executive report, SLSA provenance 실패가 limitation으로 기록됨 (기존: 무시). SLSA 실패 시 `gate_passed=False` 설정.
+
+### Phase 3: 리포트 중복 제거
+- **`_finalize_report()` 헬퍼 추출** (`run.py`): 예산 소진/정상 종료 경로 간 ~35줄 중복 제거.
+- **Extraction schema 통일** (`run.py`): 3개 extraction summary 코드 경로가 동일한 12-key 스키마 생성.
+
+### Phase 4: CI/CD
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): pytest (Python 3.10-3.12), ruff lint, pyright typecheck 자동화.
+- **Ruff linting 설정** (`pyproject.toml`) + **Pyright standard mode** (`pyrightconfig.json`).
+
+### Phase 5: 레지스트리 정리
+- **firmware_lineage, fuzzing stage**: 기존에 등록만 되고 인스턴스화되지 않던 stage를 전체 파이프라인에 포함.
+
 ## Known Issues (중요)
 
 - 샌드박스/호스트 정책에 따라 `serve --once`가 포트 바인딩 권한 문제로 실패할 수 있음 (`Operation not permitted`).
@@ -60,7 +83,7 @@
   - 현재는 `--rootfs` 우회가 보완 경로이며, 포맷 전용 extractor 체인 확장은 계속 필요.
 - 바이너리 보안 속성(NX/PIE/RELRO/Canary)이 순수 Python `.dynstr` 파싱으로 수집되며 findings 점수에 반영. FORTIFY_SOURCE 탐지 포함. 디컴파일/CFG 기반 정밀 분석은 Ghidra 연동으로 보완.
 - **Ghidra 분석**: `run.py` 자동 실행에 optional로 포함 (Ghidra 미설치 시 graceful skip). `--stages ghidra_analysis`로도 수동 실행 가능.
-- **AFL++ 퍼징**: 기본 파이프라인에 포함되지 않음 (선택 기능). `--stages fuzzing`으로 수동 실행. Docker + AFL++ 이미지 필요.
+- **AFL++ 퍼징**: 전체 파이프라인에 포함됨 (Docker + AFL++ 미설치 시 graceful skip). `--stages fuzzing`으로도 수동 실행 가능.
 - Reachability에서 CVE 컴포넌트명과 graph 노드 ID 형식 불일치(`curl` vs `component:curl`)로 일부 `no_graph_data` 발생. 매칭 로직 개선 필요.
 
 ## 다음 우선순위
@@ -71,3 +94,4 @@
 4) Ghidra dataflow 결과를 source-sink 그래프와 findings confidence에 통합
 5) 퍼징 크래시를 exploit_autopoc PoC seed로 자동 연계
 6) Public benchmark corpus 확장 (현재 seed fixture → 실제 공개 펌웨어 corpus)
+7) 남은 `_assert_under_dir()` 로컬 복사본을 `path_safety.py` import로 통합 (26파일)

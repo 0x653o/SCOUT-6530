@@ -10,6 +10,8 @@
 
 <br />
 
+[![CI](https://github.com/rootk1m/SCOUT/actions/workflows/ci.yml/badge.svg)](https://github.com/rootk1m/SCOUT/actions/workflows/ci.yml)
+
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 [![Stages](https://img.shields.io/badge/Pipeline-34_Stages-blueviolet?style=for-the-badge)]()
@@ -55,6 +57,10 @@
 | **SLSA L2 Provenance** | 분석 아티팩트용 in-toto attestation, cosign 서명 가능 |
 | **벤치마크 러너** | Corpus 기반 precision / recall / FPR 품질 측정 |
 | **Quality Gate 오버라이드** | CI/CD 파이프라인용 환경변수 기반 품질 임계값 설정 |
+| **GitHub Actions CI** | push/PR마다 pytest (3.10-3.12), ruff lint, pyright type checking 자동 실행 |
+| **Findings SHA-256 매니페스트** | `stages/findings/stage.json`에 아티팩트별 SHA-256 해시 포함 -- 증거 체인 완전 커버리지 |
+| **Handoff 유효성 검증** | `firmware_handoff.json` 기록 전 `validate_handoff()`로 필수 키 검증 -- 누락 조기 탐지 |
+| **Exploit Stage 격리** | 각 exploit stage가 독립적 import error 처리 -- 단일 의존성 누락이 5개 stage를 모두 건너뛰지 않음 |
 
 ---
 
@@ -335,6 +341,7 @@ aiedge-runs/<run_id>/
 │   │   └── source_sink_graph.json
 │   ├── ghidra_analysis/             # 선택사항
 │   ├── findings/
+│   │   ├── stage.json                # SHA-256 매니페스트 (증거 체인)
 │   │   ├── pattern_scan.json
 │   │   ├── credential_mapping.json
 │   │   ├── chains.json
@@ -419,9 +426,12 @@ SCOUT는 적절한 승인 하에 통제된 환경에서 사용해야 합니다:
 
 1. **읽기** [Blueprint](docs/blueprint.md)에서 아키텍처 맥락 파악
 2. **실행** `pytest -q` -- 모든 테스트 통과 필수
-3. **확인** `pyright src/` -- 타입 에러 0개
-4. **준수** 기존 stage 프로토콜 (`src/aiedge/stage.py`의 `Stage` 참조)
-5. **pip 의존성 제로** -- 코어 모듈은 stdlib만 사용
+3. **린트** `ruff check src/` -- lint 위반 0개
+4. **확인** `pyright src/` -- 타입 에러 0개
+5. **준수** 기존 stage 프로토콜 (`src/aiedge/stage.py`의 `Stage` 참조)
+6. **pip 의존성 제로** -- 코어 모듈은 stdlib만 사용
+
+CI가 모든 push와 pull request에서 이 검사들을 자동 실행합니다 (GitHub Actions).
 
 새 파이프라인 스테이지 추가는 `CLAUDE.md`의 "Adding a New Pipeline Stage" 섹션을 참조하세요.
 

@@ -10,6 +10,8 @@
 
 <br />
 
+[![CI](https://github.com/rootk1m/SCOUT/actions/workflows/ci.yml/badge.svg)](https://github.com/rootk1m/SCOUT/actions/workflows/ci.yml)
+
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 [![Stages](https://img.shields.io/badge/Pipeline-34_Stages-blueviolet?style=for-the-badge)]()
@@ -55,6 +57,10 @@
 | **SLSA L2 Provenance** | in-toto attestation for analysis artifacts, cosign-ready verification |
 | **Benchmark Runner** | Corpus-based quality measurement with precision / recall / FPR tracking |
 | **Quality Gate Overrides** | Configurable thresholds via environment variables for CI/CD pipelines |
+| **GitHub Actions CI** | Automated pytest (3.10-3.12), ruff lint, and pyright type checking on every push/PR |
+| **Findings SHA-256 Manifest** | `stages/findings/stage.json` now carries per-artifact SHA-256 hashes for full evidence chain coverage |
+| **Handoff Validation** | `firmware_handoff.json` is validated via `validate_handoff()` before write -- missing keys are caught early |
+| **Exploit Stage Isolation** | Each exploit stage has independent import error handling; a single missing dependency no longer skips all five |
 
 ---
 
@@ -335,6 +341,7 @@ aiedge-runs/<run_id>/
 │   │   └── source_sink_graph.json
 │   ├── ghidra_analysis/             # optional
 │   ├── findings/
+│   │   ├── stage.json                # SHA-256 manifest (evidence chain)
 │   │   ├── pattern_scan.json
 │   │   ├── credential_mapping.json
 │   │   ├── chains.json
@@ -419,9 +426,12 @@ Contributions are welcome. Before submitting a pull request:
 
 1. **Read** [Blueprint](docs/blueprint.md) for architecture context
 2. **Run** `pytest -q` -- all tests must pass
-3. **Check** `pyright src/` -- zero type errors
-4. **Follow** the existing stage protocol (see `Stage` in `src/aiedge/stage.py`)
-5. **Zero pip dependencies** -- stdlib only for core modules
+3. **Lint** `ruff check src/` -- zero lint violations
+4. **Check** `pyright src/` -- zero type errors
+5. **Follow** the existing stage protocol (see `Stage` in `src/aiedge/stage.py`)
+6. **Zero pip dependencies** -- stdlib only for core modules
+
+CI runs these checks automatically on every push and pull request via GitHub Actions.
 
 For new pipeline stages, see the "Adding a New Pipeline Stage" section in `CLAUDE.md`.
 

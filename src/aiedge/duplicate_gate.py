@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
@@ -467,181 +468,206 @@ def apply_duplicate_gate(
     force_retriage: bool = False,
 ) -> DuplicateGateResult:
     registry_path = resolve_duplicate_registry_path(run_dir)
-    registry = _load_registry(registry_path, created_at=seen_at)
-    records_any = registry.get("records")
-    records = cast(dict[str, dict[str, JsonValue]], records_any)
 
-    max_records = _parse_positive_int_env(
-        "AIEDGE_DUPLICATE_REGISTRY_MAX_RECORDS", _DEFAULT_MAX_RECORDS
-    )
-    max_sources_per_record = _parse_positive_int_env(
-        "AIEDGE_DUPLICATE_REGISTRY_MAX_SOURCES", _DEFAULT_MAX_SOURCES_PER_RECORD
-    )
-    t_reopen = _parse_threshold_env("AIEDGE_DUPLICATE_GATE_T_REOPEN", _DEFAULT_T_REOPEN)
-    t_force_retriage = _parse_threshold_env(
-        "AIEDGE_DUPLICATE_GATE_T_FORCE_RETRIAGE", _DEFAULT_T_FORCE_RETRIAGE
-    )
-
-    out_findings: list[dict[str, JsonValue]] = []
-    new: list[dict[str, JsonValue]] = []
-    suppressed: list[dict[str, JsonValue]] = []
-    reopened: list[dict[str, JsonValue]] = []
-    novelty_table: list[dict[str, JsonValue]] = []
-    ranking: list[dict[str, JsonValue]] = []
-    warnings: list[str] = []
-
-    for idx, finding in enumerate(findings):
-        finding_id_any = finding.get("id")
-        finding_id = finding_id_any if isinstance(finding_id_any, str) else ""
-        claim_path = f"findings[{idx}]"
-
-        try:
-            fingerprint = claim_fingerprint_sha256(cast(dict[str, object], finding))
-        except Exception as exc:
-            reason = (
-                f"{DUPLICATE_GATE_ANALYSIS_FAIL_OPEN}: fingerprint failed for "
-                f"{claim_path}: {type(exc).__name__}: {exc}"
-            )
-            warnings.append(reason)
-            out_findings.append(dict(finding))
-            new.append(
-                {
-                    "claim_path": claim_path,
-                    "finding_id": finding_id,
-                    "reason": "analysis_fail_open",
-                }
-            )
-            continue
-
-        fingerprint_meta: dict[str, JsonValue] = {
-            "claim_path": claim_path,
-            "finding_id": finding_id,
-            "fingerprint_sha256": fingerprint,
-            "fingerprint_version": FINGERPRINT_VERSION,
-        }
-        claim_family = _claim_family(finding=finding, claim_path=claim_path)
-        evidence_hashes = _finding_evidence_hashes(finding)
-        lineage_diff_hash = _finding_lineage_diff_hash(
-            finding=finding,
-            claim_family=claim_family,
+    _lock_path = registry_path.parent / (registry_path.name + ".lock")
+    _lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _lock_fd = open(_lock_path, "w")  # noqa: SIM115
+    fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_EX)
+    try:
+        registry = _load_registry(registry_path, created_at=seen_at)
+        records_any = registry.get("records")
+        records = cast(dict[str, dict[str, JsonValue]], records_any)
+    
+        max_records = _parse_positive_int_env(
+            "AIEDGE_DUPLICATE_REGISTRY_MAX_RECORDS", _DEFAULT_MAX_RECORDS
         )
-
-        existing = records.get(fingerprint)
-        if existing is not None:
-            previous_evidence_hashes = _coerce_hash_list(
-                existing.get("evidence_hashes")
-            )
-            previous_lineage_diff_hash_any = existing.get("lineage_diff_hash")
-            previous_lineage_diff_hash = (
-                previous_lineage_diff_hash_any
-                if isinstance(previous_lineage_diff_hash_any, str)
-                else ""
-            )
-            previous_novelty_any = existing.get("last_novelty_score")
-            previous_novelty = (
-                float(previous_novelty_any)
-                if isinstance(previous_novelty_any, (int, float))
-                else 0.0
-            )
-            evidence_hash_delta = evidence_hashes != previous_evidence_hashes
-            lineage_diff_hash_delta = (
-                bool(lineage_diff_hash)
-                and lineage_diff_hash != previous_lineage_diff_hash
-            )
-            novelty_score = _novelty_score(
-                known_duplicate=True,
-                evidence_hash_delta=evidence_hash_delta,
-                lineage_diff_hash_delta=lineage_diff_hash_delta,
-                force_retriage=force_retriage,
-                t_force_retriage=t_force_retriage,
-            )
-            auto_reason_codes: list[str] = []
-            if evidence_hash_delta:
-                auto_reason_codes.append(_AUTO_REOPEN_EVIDENCE_HASH_DELTA)
-            if lineage_diff_hash_delta:
-                auto_reason_codes.append(_AUTO_REOPEN_LINEAGE_DIFF_DELTA)
-
-            should_auto_reopen = bool(auto_reason_codes) and novelty_score >= t_reopen
-            if should_auto_reopen:
-                auto_reason_codes.append(_AUTO_REOPEN_NOVELTY_THRESHOLD_MET)
-
-            source_entries = _normalize_sources(
-                existing.get("sources"),
-                max_sources_per_record=max_sources_per_record,
-            )
-            source_entries.append(
-                _record_source(
-                    run_id=run_id,
-                    finding_id=finding_id,
-                    claim_path=claim_path,
+        max_sources_per_record = _parse_positive_int_env(
+            "AIEDGE_DUPLICATE_REGISTRY_MAX_SOURCES", _DEFAULT_MAX_SOURCES_PER_RECORD
+        )
+        t_reopen = _parse_threshold_env("AIEDGE_DUPLICATE_GATE_T_REOPEN", _DEFAULT_T_REOPEN)
+        t_force_retriage = _parse_threshold_env(
+            "AIEDGE_DUPLICATE_GATE_T_FORCE_RETRIAGE", _DEFAULT_T_FORCE_RETRIAGE
+        )
+    
+        out_findings: list[dict[str, JsonValue]] = []
+        new: list[dict[str, JsonValue]] = []
+        suppressed: list[dict[str, JsonValue]] = []
+        reopened: list[dict[str, JsonValue]] = []
+        novelty_table: list[dict[str, JsonValue]] = []
+        ranking: list[dict[str, JsonValue]] = []
+        warnings: list[str] = []
+    
+        for idx, finding in enumerate(findings):
+            finding_id_any = finding.get("id")
+            finding_id = finding_id_any if isinstance(finding_id_any, str) else ""
+            claim_path = f"findings[{idx}]"
+    
+            try:
+                fingerprint = claim_fingerprint_sha256(cast(dict[str, object], finding))
+            except Exception as exc:
+                reason = (
+                    f"{DUPLICATE_GATE_ANALYSIS_FAIL_OPEN}: fingerprint failed for "
+                    f"{claim_path}: {type(exc).__name__}: {exc}"
                 )
+                warnings.append(reason)
+                out_findings.append(dict(finding))
+                new.append(
+                    {
+                        "claim_path": claim_path,
+                        "finding_id": finding_id,
+                        "reason": "analysis_fail_open",
+                    }
+                )
+                continue
+    
+            fingerprint_meta: dict[str, JsonValue] = {
+                "claim_path": claim_path,
+                "finding_id": finding_id,
+                "fingerprint_sha256": fingerprint,
+                "fingerprint_version": FINGERPRINT_VERSION,
+            }
+            claim_family = _claim_family(finding=finding, claim_path=claim_path)
+            evidence_hashes = _finding_evidence_hashes(finding)
+            lineage_diff_hash = _finding_lineage_diff_hash(
+                finding=finding,
+                claim_family=claim_family,
             )
-            existing["sources"] = cast(
-                JsonValue,
-                _normalize_sources(
-                    source_entries,
+    
+            existing = records.get(fingerprint)
+            if existing is not None:
+                previous_evidence_hashes = _coerce_hash_list(
+                    existing.get("evidence_hashes")
+                )
+                previous_lineage_diff_hash_any = existing.get("lineage_diff_hash")
+                previous_lineage_diff_hash = (
+                    previous_lineage_diff_hash_any
+                    if isinstance(previous_lineage_diff_hash_any, str)
+                    else ""
+                )
+                previous_novelty_any = existing.get("last_novelty_score")
+                previous_novelty = (
+                    float(previous_novelty_any)
+                    if isinstance(previous_novelty_any, (int, float))
+                    else 0.0
+                )
+                evidence_hash_delta = evidence_hashes != previous_evidence_hashes
+                lineage_diff_hash_delta = (
+                    bool(lineage_diff_hash)
+                    and lineage_diff_hash != previous_lineage_diff_hash
+                )
+                novelty_score = _novelty_score(
+                    known_duplicate=True,
+                    evidence_hash_delta=evidence_hash_delta,
+                    lineage_diff_hash_delta=lineage_diff_hash_delta,
+                    force_retriage=force_retriage,
+                    t_force_retriage=t_force_retriage,
+                )
+                auto_reason_codes: list[str] = []
+                if evidence_hash_delta:
+                    auto_reason_codes.append(_AUTO_REOPEN_EVIDENCE_HASH_DELTA)
+                if lineage_diff_hash_delta:
+                    auto_reason_codes.append(_AUTO_REOPEN_LINEAGE_DIFF_DELTA)
+    
+                should_auto_reopen = bool(auto_reason_codes) and novelty_score >= t_reopen
+                if should_auto_reopen:
+                    auto_reason_codes.append(_AUTO_REOPEN_NOVELTY_THRESHOLD_MET)
+    
+                source_entries = _normalize_sources(
+                    existing.get("sources"),
                     max_sources_per_record=max_sources_per_record,
-                ),
-            )
-            existing["last_seen_at"] = seen_at
-            existing["claim_family"] = claim_family
-            existing["evidence_hashes"] = cast(
-                JsonValue, cast(list[object], evidence_hashes)
-            )
-            existing["lineage_diff_hash"] = lineage_diff_hash
-            existing["last_novelty_score"] = novelty_score
-            if force_retriage or should_auto_reopen:
-                reason_codes = sorted(
-                    set(
-                        [_MANUAL_OVERRIDE_REASON, _FORCE_RETRIAGE_REASON]
-                        if force_retriage
-                        else auto_reason_codes
+                )
+                source_entries.append(
+                    _record_source(
+                        run_id=run_id,
+                        finding_id=finding_id,
+                        claim_path=claim_path,
                     )
                 )
-                reopened_item = {
-                    **fingerprint_meta,
-                    "previous_status": "suppressed_exact_duplicate",
-                    "new_status": "reopened",
-                    "trigger_reason_codes": cast(
-                        list[JsonValue], cast(list[object], reason_codes)
+                existing["sources"] = cast(
+                    JsonValue,
+                    _normalize_sources(
+                        source_entries,
+                        max_sources_per_record=max_sources_per_record,
                     ),
-                    "evidence_hashes_added": cast(
-                        list[JsonValue],
-                        cast(
-                            list[object],
-                            sorted(
-                                set(evidence_hashes) - set(previous_evidence_hashes)
-                            ),
-                        ),
-                    ),
-                    "evidence_hashes_removed": cast(
-                        list[JsonValue],
-                        cast(
-                            list[object],
-                            sorted(
-                                set(previous_evidence_hashes) - set(evidence_hashes)
-                            ),
-                        ),
-                    ),
-                    "lineage_diff_hash_before": previous_lineage_diff_hash,
-                    "lineage_diff_hash_after": lineage_diff_hash,
-                    "novelty_before": _rounded_score(previous_novelty),
-                    "novelty_after": novelty_score,
-                    "deterministic_recompute_ok": True,
-                    "force_retriage": force_retriage,
-                    "force_retriage_threshold": t_force_retriage,
-                    "force_retriage_threshold_met": novelty_score >= t_force_retriage,
-                }
-                reopened.append(cast(dict[str, JsonValue], reopened_item))
-                out_findings.append(dict(finding))
-                existing["last_classification"] = "context_changed_reopen"
-                existing["last_reopen_reason_codes"] = cast(
-                    JsonValue, cast(list[object], reason_codes)
                 )
+                existing["last_seen_at"] = seen_at
+                existing["claim_family"] = claim_family
+                existing["evidence_hashes"] = cast(
+                    JsonValue, cast(list[object], evidence_hashes)
+                )
+                existing["lineage_diff_hash"] = lineage_diff_hash
+                existing["last_novelty_score"] = novelty_score
+                if force_retriage or should_auto_reopen:
+                    reason_codes = sorted(
+                        set(
+                            [_MANUAL_OVERRIDE_REASON, _FORCE_RETRIAGE_REASON]
+                            if force_retriage
+                            else auto_reason_codes
+                        )
+                    )
+                    reopened_item = {
+                        **fingerprint_meta,
+                        "previous_status": "suppressed_exact_duplicate",
+                        "new_status": "reopened",
+                        "trigger_reason_codes": cast(
+                            list[JsonValue], cast(list[object], reason_codes)
+                        ),
+                        "evidence_hashes_added": cast(
+                            list[JsonValue],
+                            cast(
+                                list[object],
+                                sorted(
+                                    set(evidence_hashes) - set(previous_evidence_hashes)
+                                ),
+                            ),
+                        ),
+                        "evidence_hashes_removed": cast(
+                            list[JsonValue],
+                            cast(
+                                list[object],
+                                sorted(
+                                    set(previous_evidence_hashes) - set(evidence_hashes)
+                                ),
+                            ),
+                        ),
+                        "lineage_diff_hash_before": previous_lineage_diff_hash,
+                        "lineage_diff_hash_after": lineage_diff_hash,
+                        "novelty_before": _rounded_score(previous_novelty),
+                        "novelty_after": novelty_score,
+                        "deterministic_recompute_ok": True,
+                        "force_retriage": force_retriage,
+                        "force_retriage_threshold": t_force_retriage,
+                        "force_retriage_threshold_met": novelty_score >= t_force_retriage,
+                    }
+                    reopened.append(cast(dict[str, JsonValue], reopened_item))
+                    out_findings.append(dict(finding))
+                    existing["last_classification"] = "context_changed_reopen"
+                    existing["last_reopen_reason_codes"] = cast(
+                        JsonValue, cast(list[object], reason_codes)
+                    )
+                    novelty_table.append(
+                        {
+                            **fingerprint_meta,
+                            "status": "reopened",
+                            "novelty_score": novelty_score,
+                            "known_duplicate": True,
+                        }
+                    )
+                    ranking.append(
+                        {
+                            **fingerprint_meta,
+                            "status": "reopened",
+                            "novelty_score": novelty_score,
+                        }
+                    )
+                    continue
+    
+                suppressed.append(fingerprint_meta)
+                existing["last_classification"] = "exact_fingerprint_duplicate"
                 novelty_table.append(
                     {
                         **fingerprint_meta,
-                        "status": "reopened",
+                        "status": "suppressed",
                         "novelty_score": novelty_score,
                         "known_duplicate": True,
                     }
@@ -649,74 +675,58 @@ def apply_duplicate_gate(
                 ranking.append(
                     {
                         **fingerprint_meta,
-                        "status": "reopened",
+                        "status": "suppressed",
                         "novelty_score": novelty_score,
                     }
                 )
                 continue
-
-            suppressed.append(fingerprint_meta)
-            existing["last_classification"] = "exact_fingerprint_duplicate"
+    
+            out_findings.append(dict(finding))
+            new.append(fingerprint_meta)
             novelty_table.append(
                 {
                     **fingerprint_meta,
-                    "status": "suppressed",
-                    "novelty_score": novelty_score,
-                    "known_duplicate": True,
+                    "status": "new",
+                    "novelty_score": 1.0,
+                    "known_duplicate": False,
                 }
             )
             ranking.append(
                 {
                     **fingerprint_meta,
-                    "status": "suppressed",
-                    "novelty_score": novelty_score,
+                    "status": "new",
+                    "novelty_score": 1.0,
                 }
             )
-            continue
-
-        out_findings.append(dict(finding))
-        new.append(fingerprint_meta)
-        novelty_table.append(
-            {
-                **fingerprint_meta,
-                "status": "new",
-                "novelty_score": 1.0,
-                "known_duplicate": False,
+            records[fingerprint] = {
+                "fingerprint": fingerprint,
+                "fingerprint_version": FINGERPRINT_VERSION,
+                "first_seen_run_id": run_id,
+                "last_seen_at": seen_at,
+                "sources": [
+                    _record_source(
+                        run_id=run_id,
+                        finding_id=finding_id,
+                        claim_path=claim_path,
+                    )
+                ],
+                "claim_family": claim_family,
+                "evidence_hashes": cast(JsonValue, cast(list[object], evidence_hashes)),
+                "lineage_diff_hash": lineage_diff_hash,
+                "last_novelty_score": 1.0,
+                "last_classification": "exact_fingerprint_duplicate",
             }
-        )
-        ranking.append(
-            {
-                **fingerprint_meta,
-                "status": "new",
-                "novelty_score": 1.0,
-            }
-        )
-        records[fingerprint] = {
-            "fingerprint": fingerprint,
-            "fingerprint_version": FINGERPRINT_VERSION,
-            "first_seen_run_id": run_id,
-            "last_seen_at": seen_at,
-            "sources": [
-                _record_source(
-                    run_id=run_id,
-                    finding_id=finding_id,
-                    claim_path=claim_path,
-                )
-            ],
-            "claim_family": claim_family,
-            "evidence_hashes": cast(JsonValue, cast(list[object], evidence_hashes)),
-            "lineage_diff_hash": lineage_diff_hash,
-            "last_novelty_score": 1.0,
-            "last_classification": "exact_fingerprint_duplicate",
+    
+        pruned_records = _prune_records(records, max_records=max_records)
+        registry_payload = {
+            "schema_version": DUPLICATE_REGISTRY_SCHEMA_VERSION,
+            "created_at": cast(str, registry.get("created_at", seen_at)),
+            "records": cast(JsonValue, pruned_records),
         }
-
-    pruned_records = _prune_records(records, max_records=max_records)
-    registry_payload = {
-        "schema_version": DUPLICATE_REGISTRY_SCHEMA_VERSION,
-        "created_at": cast(str, registry.get("created_at", seen_at)),
-        "records": cast(JsonValue, pruned_records),
-    }
-    _atomic_write_json(registry_path, registry_payload)
+        _atomic_write_json(registry_path, registry_payload)
+    finally:
+        fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_UN)
+        _lock_fd.close()
 
     suppressed_sorted = sorted(
         suppressed,

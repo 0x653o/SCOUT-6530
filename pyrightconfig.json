@@ -1,6 +1,7 @@
 {
   "include": ["src"],
   "extraPaths": ["src"],
+  "typeCheckingMode": "standard",
   "executionEnvironments": [
     {
       "root": "src",

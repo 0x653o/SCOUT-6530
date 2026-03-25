@@ -10,6 +10,7 @@ import os
 import shutil
 import ssl
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -506,6 +507,9 @@ class OllamaDriver:
         )
 
 
+_KNOWN_LLM_DRIVERS = frozenset({"codex", "claude", "ollama"})
+
+
 def resolve_driver() -> LLMDriver:
     """Return the configured LLM driver (default: codex)."""
     driver_name = os.environ.get("AIEDGE_LLM_DRIVER", "codex").strip().lower()
@@ -513,4 +517,9 @@ def resolve_driver() -> LLMDriver:
         return ClaudeAPIDriver()
     if driver_name == "ollama":
         return OllamaDriver()
+    if driver_name not in _KNOWN_LLM_DRIVERS:
+        sys.stderr.write(
+            f"[AIEDGE] WARNING: unrecognized AIEDGE_LLM_DRIVER={driver_name!r}, "
+            f"falling back to codex. Valid drivers: {sorted(_KNOWN_LLM_DRIVERS)}\n"
+        )
     return CodexCLIDriver()  # default fallback

@@ -38,6 +38,9 @@ pytest -q                                        # full suite
 pytest -q tests/test_inventory.py                # single module
 pytest -q tests/test_inventory.py::test_func     # single test
 
+# Linting (ruff configured via pyproject.toml)
+ruff check src/
+
 # Type checking (pyright configured via pyrightconfig.json)
 pyright src/
 
@@ -115,7 +118,7 @@ Select via `AIEDGE_LLM_DRIVER=codex|claude|ollama`. All three support `ModelTier
 - **Determinism** (`determinism.py`): Canonical JSON bundles ensure reproducible runs
 - **Quality gates** (`quality_policy.py`, `quality_metrics.py`): Threshold checks and corpus-based evaluation
 - **Schema validation** (`schema.py`): Report validation, version tracking, verdict semantics
-- **Duplicate gate** (`duplicate_gate.py`): Cross-run duplicate suppression with Terminator feedback integration
+- **Duplicate gate** (`duplicate_gate.py`): Cross-run duplicate suppression with Terminator feedback integration. Uses `fcntl.flock()` advisory locking for concurrent-run safety
 
 ### Path Safety — Critical Security Invariant
 
@@ -123,7 +126,7 @@ Select via `AIEDGE_LLM_DRIVER=codex|claude|ollama`. All three support `ModelTier
 
 ### Special Stage Patterns
 
-- **`findings` stage**: NOT registered in `_STAGE_FACTORIES`. Runs as an integrated step via `run_findings(ctx)` called from `run.py` after all registered stages complete. Cannot be invoked standalone via `--stages findings`.
+- **`findings` stage**: NOT registered in `_STAGE_FACTORIES`. Runs as an integrated step via `run_findings(ctx)` called from `run.py` after all registered stages complete. Cannot be invoked standalone via `--stages findings`. `_write_findings_manifest()` in `run.py` generates `stages/findings/stage.json` with SHA-256 hashes for all finding artifacts.
 - **`exploit_gate` stage**: Registered in `_STAGE_FACTORIES` but has no dedicated module file. Its factory `_make_exploit_gate_stage` is defined inline in `stage_registry.py`.
 
 ### CLI Entry Point
@@ -138,12 +141,14 @@ Select via `AIEDGE_LLM_DRIVER=codex|claude|ollama`. All three support `ModelTier
 4. Stage output goes to `run_dir/stages/your_stage/stage.json` + artifacts
 5. The factory signature is `(run_info, case_id, remaining_budget_fn, no_llm) -> Stage`
 6. Add tests in `tests/test_your_stage.py`
+7. In `run.py`, wrap each stage import in its own `try/except ImportError` block -- never group multiple stage imports under a single try/except, so that one missing dependency does not skip unrelated stages
 
 ## Critical Coupling Points
 
 - **`stage.py`** Protocol/dataclass changes affect all 34 registered stages
 - **`schema.py`** validation changes affect report generation, quality gates, and all verification scripts
-- **`run.py`** report finalization changes affect all verification scripts and handoff generation
+- **`run.py`** report finalization changes affect all verification scripts and handoff generation. The shared `_finalize_report()` helper handles both budget-exhausted and normal finalization paths -- changes there affect all exit routes
+- **`schema.py`** also provides `validate_handoff()` which validates `firmware_handoff.json` before write; changes affect handoff contract integrity
 - **`exploit_tiering.py`** tier definitions are imported by `schema.py`, `findings.py`, and exploit stages
 - **`terminator_feedback.py`** bridges SCOUT↔Terminator bidirectional feedback; changes affect handoff contract
 - **`reporting.py`** report generation logic imported by `run.py`; changes affect all output formats
@@ -197,7 +202,8 @@ Additional prefixes: `AIEDGE_PORTSCAN_*` (port scanning), `AIEDGE_LLM_CHAIN_*` (
 
 - **All artifact paths must be run-dir-relative.** Absolute paths in outputs are bugs. `assert_under_dir()` enforces path traversal prevention.
 - **Stages fail open, governance fails closed.** Individual stages return `partial` with whatever they could produce. Promotion gates (quality gate, release gate, verified chain) reject incomplete evidence.
-- **No finding without evidence.** Every finding requires file path, offset, hash, and rationale.
+- **No finding without evidence.** Every finding requires file path, offset, hash, and rationale. The findings stage now produces `stages/findings/stage.json` with SHA-256 hashes for all finding artifacts, closing the evidence chain gap.
+- **Handoff validation is mandatory.** `firmware_handoff.json` is validated via `validate_handoff()` in `schema.py` before write. Missing required keys raise an error rather than producing a malformed handoff.
 - **`--ack-authorization` is mandatory** for every analysis. Exploit profile requires additional attestation flags.
 - **Generated runtime artifacts** (`aiedge-runs/`, `aiedge-inputs/`, `aiedge-8mb-runs/`) are local outputs — never commit them.
 

@@ -46,6 +46,7 @@ from .schema import (
     REQUIRED_FINAL_STAGES,
     TERMINAL_STAGE_STATUSES,
     empty_report,
+    validate_handoff,
 )
 from .stage import RunReport, Stage, StageContext, StageResult, run_stages
 from .stage_registry import stage_factories
@@ -707,6 +708,43 @@ def _write_stage_manifests(
         _ = (stage_dir / "stage.json").write_text(payload, encoding="utf-8")
 
 
+def _write_findings_manifest(
+    ctx: StageContext,
+    findings_status: str,
+    findings_limitations: list[str],
+) -> None:
+    """Write a stage.json manifest for the findings stage (not a registered Stage)."""
+    stage_dir = ctx.run_dir / "stages" / "findings"
+    if not stage_dir.is_dir():
+        return
+
+    artifacts: list[dict[str, JsonValue]] = []
+    for p in sorted(stage_dir.rglob("*")):
+        if not p.is_file() or p.name == "stage.json":
+            continue
+        if "attempts" in p.parts:
+            continue
+        rel = _try_run_relative(p, ctx.run_dir)
+        if rel is None:
+            continue
+        entry: dict[str, JsonValue] = {"path": rel}
+        if p.stat().st_size <= STAGE_ARTIFACT_HASH_CAP_BYTES:
+            entry["sha256"] = _sha256_file(p)
+        artifacts.append(entry)
+
+    manifest: dict[str, JsonValue] = {
+        "contract_version": STAGE_MANIFEST_CONTRACT_VERSION,
+        "stage_name": "findings",
+        "stage_identity": f"findings@{_AIEDGE_ENGINE_VERSION}",
+        "attempt": 1,
+        "status": findings_status,
+        "limitations": cast(list[JsonValue], cast(list[object], list(findings_limitations))),
+        "artifacts": cast(list[JsonValue], cast(list[object], artifacts)),
+    }
+    payload = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    (stage_dir / "stage.json").write_text(payload, encoding="utf-8")
+
+
 def _manifest_artifact_paths(
     *,
     manifest: dict[str, object],
@@ -820,11 +858,13 @@ def _collect_handoff_bundles(run_dir: Path) -> list[dict[str, JsonValue]]:
     return bundles
 
 
-def _write_post_pipeline_artifacts(run_dir: Path) -> None:
+def _write_post_pipeline_artifacts(run_dir: Path, report: dict[str, JsonValue]) -> None:
     """Generate SARIF export, executive report, and SLSA provenance attestation.
 
     Each step is independently guarded so a failure in one does not block the
-    others or the overall pipeline.
+    others or the overall pipeline.  Failures are recorded as limitations in
+    *report* rather than silently swallowed; SLSA failures additionally mark
+    the report-completeness gate as failed because SLSA is a governance artifact.
     """
     # 1. SARIF 2.1.0 export
     try:
@@ -836,20 +876,36 @@ def _write_post_pipeline_artifacts(run_dir: Path) -> None:
                 run_dir,
                 tool_version=_AIEDGE_ENGINE_VERSION,
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        _lims = normalize_limitations_list(report.get("limitations"))
+        _tag = f"sarif_export_failed:{type(exc).__name__}"
+        if _tag not in _lims:
+            _lims.append(_tag)
+            report["limitations"] = cast(list[JsonValue], cast(list[object], _lims))
 
     # 2. Executive Markdown report
     try:
         _generate_executive_report(run_dir)
-    except Exception:
-        pass
+    except Exception as exc:
+        _lims = normalize_limitations_list(report.get("limitations"))
+        _tag = f"executive_report_failed:{type(exc).__name__}"
+        if _tag not in _lims:
+            _lims.append(_tag)
+            report["limitations"] = cast(list[JsonValue], cast(list[object], _lims))
 
     # 3. SLSA L2 provenance attestation (last — hashes all prior artifacts)
     try:
         _write_attestation(run_dir, tool_version=_AIEDGE_ENGINE_VERSION)
-    except Exception:
-        pass
+    except Exception as exc:
+        _lims = normalize_limitations_list(report.get("limitations"))
+        _tag = f"slsa_attestation_failed:{type(exc).__name__}"
+        if _tag not in _lims:
+            _lims.append(_tag)
+            report["limitations"] = cast(list[JsonValue], cast(list[object], _lims))
+        # Governance artifact failure → fail the completeness gate
+        rc = report.get("report_completeness")
+        if isinstance(rc, dict):
+            rc["gate_passed"] = False
 
 
 def _write_firmware_handoff(
@@ -944,6 +1000,11 @@ def _write_firmware_handoff(
         handoff["feedback_request"] = _gen_fb_req(_candidates_for_fb)
     except Exception:
         pass  # fail-open: feedback request generation is best-effort
+
+    handoff_errors = validate_handoff(handoff)
+    if handoff_errors:
+        import sys
+        sys.stderr.write(f"[AIEDGE] WARNING: handoff validation errors: {handoff_errors}\n")
 
     handoff_path = info.run_dir / "firmware_handoff.json"
     _ = handoff_path.write_text(
@@ -1480,6 +1541,53 @@ def _mark_report_incomplete_due_to_digest(
     report["limitations"] = cast(list[JsonValue], cast(list[object], limits))
 
 
+def _finalize_report(
+    *,
+    report: dict[str, JsonValue],
+    info: RunInfo,
+    no_llm: bool,
+    manifest_profile: str,
+    budget_s: float,
+) -> None:
+    """Shared finalization: LLM exec, completion, integrity, reports, handoff."""
+    report["llm"] = _apply_llm_exec_step(info=info, report=report, no_llm=no_llm)
+    _set_report_completion(
+        report,
+        is_final=True,
+        reason="full analyze_run completed",
+        findings_executed=True,
+    )
+    _refresh_integrity_and_completeness(report, info, findings_executed=True)
+
+    report_dir = info.run_dir / "report"
+    _ = reporting.write_report_json(report_dir, report)
+    _ = reporting.write_report_html(report_dir, report)
+    try:
+        _write_analyst_report_artifacts(report_dir, report)
+    except Exception as exc:
+        _mark_report_incomplete_due_to_digest(report=report, info=info, err=exc)
+        _ = reporting.write_report_json(report_dir, report)
+        _ = reporting.write_report_html(report_dir, report)
+        raise
+    try:
+        _write_firmware_handoff(
+            info=info,
+            profile=manifest_profile,
+            max_wallclock_per_run=int(max(1, budget_s)),
+        )
+    except Exception as exc:
+        limits = normalize_limitations_list(report.get("limitations"))
+        tag = f"firmware_handoff_write_failed:{type(exc).__name__}"
+        if tag not in limits:
+            limits.append(tag)
+            report["limitations"] = cast(
+                list[JsonValue], cast(list[object], limits)
+            )
+            _ = reporting.write_report_json(report_dir, report)
+            _ = reporting.write_report_html(report_dir, report)
+    _write_post_pipeline_artifacts(info.run_dir, report)
+
+
 def _apply_duplicate_gate_to_findings(
     *,
     report: dict[str, JsonValue],
@@ -1694,6 +1802,8 @@ def _apply_stage_result_to_report(
                 "extracted_file_count": int(extracted_count),
                 "time_budget_s": int(budget_s),
                 "extraction_timeout_s": float(extraction_timeout),
+                "extraction_mode": str(details.get("extraction_mode", "binwalk")),
+                "manual_rootfs_requested": bool(details.get("manual_rootfs_requested", False)),
             },
             "evidence": cast(list[JsonValue], cast(list[object], evidence)),
             "reasons": reasons,
@@ -2449,6 +2559,11 @@ def analyze_run(
                 "extracted_file_count": 0,
                 "time_budget_s": int(budget_s),
                 "extraction_timeout_s": 0.0,
+                "binwalk_log": "stages/extraction/binwalk.log",
+                "matryoshka": False,
+                "matryoshka_depth": 0,
+                "lzop_available": False,
+                "extraction_mode": "binwalk",
                 "manual_rootfs_requested": bool(source_rootfs_dir is not None),
             },
             "evidence": [
@@ -3171,6 +3286,11 @@ def analyze_run(
             }
 
         findings_res = run_findings(ctx)
+        _write_findings_manifest(
+            ctx,
+            getattr(findings_res, "status", "ok"),
+            list(getattr(findings_res, "limitations", [])),
+        )
         deduped_findings_early = _apply_duplicate_gate_to_findings(
             report=report,
             info=info,
@@ -3229,42 +3349,13 @@ def analyze_run(
                 list(existing_limits_post_llm_early)
                 + list(llm_synthesis_limits_early),
             )
-        report["llm"] = _apply_llm_exec_step(info=info, report=report, no_llm=no_llm)
-        _set_report_completion(
-            report,
-            is_final=True,
-            reason="full analyze_run completed",
-            findings_executed=True,
+        _finalize_report(
+            report=report,
+            info=info,
+            no_llm=no_llm,
+            manifest_profile=manifest_profile,
+            budget_s=budget_s,
         )
-        _refresh_integrity_and_completeness(report, info, findings_executed=True)
-
-        report_dir = info.run_dir / "report"
-        _ = reporting.write_report_json(report_dir, report)
-        _ = reporting.write_report_html(report_dir, report)
-        try:
-            _write_analyst_report_artifacts(report_dir, report)
-        except Exception as exc:
-            _mark_report_incomplete_due_to_digest(report=report, info=info, err=exc)
-            _ = reporting.write_report_json(report_dir, report)
-            _ = reporting.write_report_html(report_dir, report)
-            raise
-        try:
-            _write_firmware_handoff(
-                info=info,
-                profile=manifest_profile,
-                max_wallclock_per_run=int(max(1, budget_s)),
-            )
-        except Exception as exc:
-            limits = normalize_limitations_list(report.get("limitations"))
-            tag = f"firmware_handoff_write_failed:{type(exc).__name__}"
-            if tag not in limits:
-                limits.append(tag)
-                report["limitations"] = cast(
-                    list[JsonValue], cast(list[object], limits)
-                )
-                _ = reporting.write_report_json(report_dir, report)
-                _ = reporting.write_report_html(report_dir, report)
-        _write_post_pipeline_artifacts(info.run_dir)
         return combine_overall_status("skipped", inv_status, emu_status)
 
     extraction_timeout_s = min(
@@ -3324,28 +3415,64 @@ def analyze_run(
         LLMSynthesisStage(no_llm=no_llm),
         make_emulation_stage(),
     ]
-    # Optional: Ghidra headless analysis (requires Ghidra installation)
+    # Optional stages (import may fail if dependencies are not available)
+    _import_limitations: list[str] = []
     try:
-        from .ghidra_analysis import GhidraAnalysisStage
-        stages.append(GhidraAnalysisStage())
-    except Exception:
-        pass
+        from .firmware_lineage import FirmwareLineageStage
+        # Insert after extraction (index of StructureStage - 1)
+        _ext_idx = next((i for i, s in enumerate(stages) if s.name == "structure"), len(stages))
+        stages.insert(_ext_idx, FirmwareLineageStage())
+    except ImportError as exc:
+        _import_limitations.append(f"firmware_lineage import failed: {exc}")
+    try:
+        from .ghidra_analysis import make_ghidra_analysis_stage
+        stages.append(make_ghidra_analysis_stage(info, source_input_path, remaining_s, no_llm))
+    except ImportError as exc:
+        _import_limitations.append(f"ghidra_analysis import failed: {exc}")
     try:
         from .exploit_chain import ExploitChainStage, ExploitGateStage
+    except ImportError as exc:
+        _import_limitations.append(f"exploit_chain import failed: {exc}")
+        ExploitChainStage = None  # type: ignore[assignment]
+        ExploitGateStage = None  # type: ignore[assignment]
+    try:
         from .dynamic_validation import DynamicValidationStage
+    except ImportError as exc:
+        _import_limitations.append(f"dynamic_validation import failed: {exc}")
+        DynamicValidationStage = None  # type: ignore[assignment]
+    try:
+        from .fuzz_campaign import make_fuzz_campaign_stage as _make_fuzz_campaign_stage
+    except ImportError as exc:
+        _import_limitations.append(f"fuzzing import failed: {exc}")
+        _make_fuzz_campaign_stage = None  # type: ignore[assignment]
+    try:
         from .poc_validation import PocValidationStage
+    except ImportError as exc:
+        _import_limitations.append(f"poc_validation import failed: {exc}")
+        PocValidationStage = None  # type: ignore[assignment]
+    try:
         from .exploit_policy import ExploitEvidencePolicyStage
-
-        if manifest_profile == "exploit":
-            stages.append(DynamicValidationStage())
+    except ImportError as exc:
+        _import_limitations.append(f"exploit_policy import failed: {exc}")
+        ExploitEvidencePolicyStage = None  # type: ignore[assignment]
+    if manifest_profile == "exploit" and DynamicValidationStage is not None:
+        stages.append(DynamicValidationStage())
+    if manifest_profile == "exploit" and _make_fuzz_campaign_stage is not None:
+        stages.append(_make_fuzz_campaign_stage(info, source_input_path, remaining_s, no_llm))
+    if ExploitGateStage is not None:
         stages.append(ExploitGateStage())
+    if ExploitChainStage is not None:
         stages.append(ExploitChainStage())
+    if PocValidationStage is not None:
         stages.append(PocValidationStage())
+    if ExploitEvidencePolicyStage is not None:
         stages.append(ExploitEvidencePolicyStage())
-    except Exception:
-        pass
     rep = run_stages(stages, ctx)
     _write_stage_manifests(ctx=ctx, stages=stages, report=rep)
+    if _import_limitations:
+        _existing_lims = normalize_limitations_list(report.get("limitations"))
+        _existing_lims.extend(_import_limitations)
+        report["limitations"] = cast(list[JsonValue], cast(list[object], _existing_lims))
 
     extraction_res = next(
         (r for r in rep.stage_results if r.stage == "extraction"), None
@@ -4107,6 +4234,11 @@ def analyze_run(
     )
 
     findings_res = run_findings(ctx)
+    _write_findings_manifest(
+        ctx,
+        getattr(findings_res, "status", "ok"),
+        list(getattr(findings_res, "limitations", [])),
+    )
     deduped_findings = _apply_duplicate_gate_to_findings(
         report=report,
         info=info,
@@ -4197,46 +4329,13 @@ def analyze_run(
     report["exploit_assessment"] = _build_exploit_assessment(
         profile=manifest_profile, report=report, run_dir=info.run_dir
     )
-    report["llm"] = _apply_llm_exec_step(info=info, report=report, no_llm=no_llm)
-    _set_report_completion(
-        report,
-        is_final=True,
-        reason="full analyze_run completed",
-        findings_executed=True,
+    _finalize_report(
+        report=report,
+        info=info,
+        no_llm=no_llm,
+        manifest_profile=manifest_profile,
+        budget_s=budget_s,
     )
-    _refresh_integrity_and_completeness(report, info, findings_executed=True)
-
-    report_dir = info.run_dir / "report"
-    _ = reporting.write_report_json(report_dir, report)
-    _ = reporting.write_report_html(report_dir, report)
-    try:
-        _write_analyst_report_artifacts(report_dir, report)
-    except Exception as exc:
-        _mark_report_incomplete_due_to_digest(report=report, info=info, err=exc)
-        _ = reporting.write_report_json(report_dir, report)
-        _ = reporting.write_report_html(report_dir, report)
-        raise
-    try:
-        _write_firmware_handoff(
-            info=info,
-            profile=manifest_profile,
-            max_wallclock_per_run=int(max(1, budget_s)),
-        )
-    except Exception as exc:
-        existing_limits_after_handoff = normalize_limitations_list(
-            report.get("limitations")
-        )
-        handoff_tag = f"firmware_handoff_write_failed:{type(exc).__name__}"
-        if handoff_tag not in existing_limits_after_handoff:
-            existing_limits_after_handoff.append(handoff_tag)
-            report["limitations"] = cast(
-                list[JsonValue],
-                cast(list[object], existing_limits_after_handoff),
-            )
-            _ = reporting.write_report_json(report_dir, report)
-            _ = reporting.write_report_html(report_dir, report)
-
-    _write_post_pipeline_artifacts(info.run_dir)
 
     extraction_status = cast(str, report["extraction"].get("status", "failed"))
     inventory_status = cast(str, report["inventory"].get("status", "failed"))

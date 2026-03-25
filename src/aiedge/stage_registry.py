@@ -545,6 +545,9 @@ def _make_fuzzing_stage(
     return make_fuzz_campaign_stage(info, source_input_path, remaining_s, no_llm)
 
 
+# All stages registered here are included in the full pipeline in run.py:analyze_run().
+# firmware_lineage runs after ExtractionStage (depends on extraction output).
+# fuzzing runs in the exploit section (manifest_profile == "exploit") near DynamicValidationStage.
 _STAGE_FACTORIES: dict[str, StageFactory] = {
     "tooling": _make_tooling_stage,
     "ota": _make_ota_stage,

@@ -1126,3 +1126,29 @@ def validate_analyst_digest(digest: object) -> list[str]:
                     )
 
     return errors
+
+
+def validate_handoff(handoff: object) -> list[str]:
+    """Validate firmware_handoff.json structure. Returns list of error strings (empty = valid)."""
+    errors: list[str] = []
+    if not isinstance(handoff, dict):
+        return ["handoff must be a dict"]
+    h = cast(dict[str, object], handoff)
+    for key in ("schema_version", "generated_at", "profile", "policy", "aiedge", "bundles"):
+        if key not in h:
+            errors.append(f"missing required handoff key: {key}")
+    bundles = h.get("bundles")
+    if not isinstance(bundles, list):
+        errors.append("handoff.bundles must be a list")
+    elif not bundles:
+        errors.append("handoff.bundles must be non-empty")
+    else:
+        for i, b in enumerate(bundles):
+            if not isinstance(b, dict):
+                errors.append(f"handoff.bundles[{i}] must be a dict")
+                continue
+            bd = cast(dict[str, object], b)
+            for bk in ("id", "stage", "status", "artifacts"):
+                if bk not in bd:
+                    errors.append(f"handoff.bundles[{i}] missing key: {bk}")
+    return errors
