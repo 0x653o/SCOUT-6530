@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SCOUT (AIEdge) is a deterministic firmware-to-exploit evidence engine. It takes firmware blobs as input and produces hash-anchored evidence artifacts through a 34-stage sequential pipeline — from unpacking through vulnerability discovery to exploit chain verification. SCOUT is the evidence-production layer; a separate orchestrator (Terminator) applies LLM judgment and dynamic validation on top via `firmware_handoff.json`.
+SCOUT (AIEdge) is a deterministic firmware-to-exploit evidence engine. It takes firmware blobs as input and produces hash-anchored evidence artifacts through a 41-stage sequential pipeline — from unpacking through vulnerability discovery to exploit chain verification. SCOUT is the evidence-production layer; a separate orchestrator (Terminator) applies LLM judgment and dynamic validation on top via `firmware_handoff.json`.
 
 **Key constraints:** Pure Python 3.10+ with zero pip dependencies (stdlib only). External tools (binwalk, QEMU, FirmAE, docker) are runtime-optional.
 
@@ -79,9 +79,21 @@ Stages execute sequentially via `run_stages()` in `src/aiedge/stage.py`. Each st
 - Property `name: str`
 - Method `run(ctx: StageContext) -> StageOutcome`
 
-Stages are registered as factory functions in `src/aiedge/stage_registry.py` (`_STAGE_FACTORIES` dict, 34 entries). Stage factories are instantiated by `run.py` which manages run directories, manifests, and report finalization.
+Stages are registered as factory functions in `src/aiedge/stage_registry.py` (`_STAGE_FACTORIES` dict, 41 entries). Stage factories are instantiated by `run.py` which manages run directories, manifests, and report finalization.
 
-**Execution order:** tooling → extraction → structure → carving → firmware_profile → inventory → ghidra_analysis → sbom → cve_scan → reachability → endpoints → surfaces → web_ui → graph → attack_surface → functional_spec → threat_model → findings → llm_triage → llm_synthesis → attribution → dynamic_validation → emulation → fuzzing → exploit_gate → exploit_chain → exploit_autopoc → poc_validation → exploit_policy (plus OTA-specific stages: ota, ota_payload, ota_fs, ota_roots, ota_boottriage, firmware_lineage)
+**Execution order:** tooling → extraction → structure → carving → firmware_profile → inventory → ghidra_analysis → semantic_classification → sbom → cve_scan → reachability → endpoints → surfaces → enhanced_source → taint_propagation → fp_verification → adversarial_triage → web_ui → graph → attack_surface → functional_spec → threat_model → llm_triage → llm_synthesis → attribution → emulation → dynamic_validation → fuzzing → poc_refinement → chain_construction → exploit_gate → exploit_chain → exploit_autopoc → poc_validation → exploit_policy (plus OTA-specific stages: ota, ota_payload, ota_fs, ota_roots, ota_boottriage, firmware_lineage)
+
+**New v2.0 stages (7):**
+
+| Stage | Module | Purpose | LLM? | Cost |
+|-------|--------|---------|------|------|
+| `enhanced_source` | `enhanced_source.py` | `.dynstr` INPUT_APIS scan (14 APIs) | No | $0 |
+| `semantic_classification` | `semantic_classifier.py` | 3-pass function classifier (static, haiku, sonnet) | Yes | Low |
+| `taint_propagation` | `taint_propagation.py` | LLM inter-procedural taint analysis with function-level cache | Yes | Medium |
+| `fp_verification` | `fp_verification.py` | 3-pattern FP removal (sanitizer/non-propagating/sysfile) | No | $0 |
+| `adversarial_triage` | `adversarial_triage.py` | Advocate/Critic LLM debate for FPR reduction | Yes | Medium |
+| `poc_refinement` | `poc_refinement.py` | Iterative PoC generation from fuzzing seeds (5 attempts) | Yes | Medium |
+| `chain_construction` | `chain_constructor.py` | Exploit chain assembly (same-binary + IPC cross-binary) | No | $0 |
 
 **IPC detection flow:** inventory → endpoints → surfaces → graph → attack_surface. ELF `.rodata`/`.dynstr` IPC symbol extraction occurs in inventory; `ipc_channel` graph nodes and 5 IPC edge types (`ipc_unix_socket`, `ipc_dbus`, `ipc_shm`, `ipc_pipe`, `ipc_exec_chain`) are emitted by graph stage.
 
@@ -131,7 +143,19 @@ Select via `AIEDGE_LLM_DRIVER=codex|claude|ollama`. All three support `ModelTier
 
 ### CLI Entry Point
 
-`__main__.py` (~4500 lines) contains all CLI subcommands, TUI rendering, and the report viewer. Subcommands: `analyze`, `analyze-8mb`, `stages`, `corpus-validate`, `quality-metrics`, `quality-gate`, `release-quality-gate`, `serve`, `mcp`, `tui`. Parser is built in `_build_parser()` (line 3367), dispatched in `main()` (line 3921). The `./scout` shell wrapper adds short aliases (`t`, `ti`, `tw`, `to`) and sets up `PYTHONPATH`.
+`__main__.py` (~660 lines) is the slim entry point that dispatches to focused CLI modules. In v2.0, the original monolithic `__main__.py` (~4500 lines) was split into 7 modules:
+
+| Module | Purpose |
+|--------|---------|
+| `__main__.py` | Entry point, subcommand dispatch, `main()` |
+| `cli_common.py` | Shared utilities, constants, helper functions |
+| `cli_serve.py` | `serve` subcommand (web report viewer) |
+| `cli_tui_data.py` | TUI data loading and processing |
+| `cli_tui_render.py` | TUI rendering and display logic |
+| `cli_tui.py` | TUI subcommand orchestration |
+| `cli_parser.py` | Argument parser construction (`_build_parser()`) |
+
+Subcommands: `analyze`, `analyze-8mb`, `stages`, `corpus-validate`, `quality-metrics`, `quality-gate`, `release-quality-gate`, `serve`, `mcp`, `tui`. The `./scout` shell wrapper adds short aliases (`t`, `ti`, `tw`, `to`) and sets up `PYTHONPATH`.
 
 ## Adding a New Pipeline Stage
 
@@ -145,7 +169,7 @@ Select via `AIEDGE_LLM_DRIVER=codex|claude|ollama`. All three support `ModelTier
 
 ## Critical Coupling Points
 
-- **`stage.py`** Protocol/dataclass changes affect all 34 registered stages
+- **`stage.py`** Protocol/dataclass changes affect all 41 registered stages
 - **`schema.py`** validation changes affect report generation, quality gates, and all verification scripts
 - **`run.py`** report finalization changes affect all verification scripts and handoff generation. The shared `_finalize_report()` helper handles both budget-exhausted and normal finalization paths -- changes there affect all exit routes
 - **`schema.py`** also provides `validate_handoff()` which validates `firmware_handoff.json` before write; changes affect handoff contract integrity
@@ -153,6 +177,8 @@ Select via `AIEDGE_LLM_DRIVER=codex|claude|ollama`. All three support `ModelTier
 - **`terminator_feedback.py`** bridges SCOUT↔Terminator bidirectional feedback; changes affect handoff contract
 - **`reporting.py`** report generation logic imported by `run.py`; changes affect all output formats
 - **`policy.py`** defines `AIEdgePolicyViolation` used by `assert_under_dir()` across 26 stage modules
+- **`cli_common.py`** shared CLI utilities imported by `cli_serve.py`, `cli_tui.py`, `cli_parser.py`, and `__main__.py`; changes affect all CLI subcommands
+- **`cli_parser.py`** argument parser definitions; adding new subcommands or flags requires changes here
 - Individual stage modules are well-isolated and safe to modify independently
 
 ## Test Infrastructure
@@ -166,6 +192,8 @@ Configured via `pyproject.toml`: `testpaths = ["tests"]`, `pythonpath = ["src"]`
 - `verify_network_isolation.py` / `verify_run_dir_evidence_only.py` — security invariants
 - `build_verified_chain.py` — constructs verified chain from run artifacts
 - `release_gate.sh` — unified release quality gate (wraps CLI `release-quality-gate`)
+
+**Benchmark scripts** in `scripts/`: `benchmark_firmae.sh` (SCOUT vs FirmAE comparison benchmark), `unpack_firmae_dataset.sh` (FirmAE dataset classifier and unpacker).
 
 **E2E scripts** in `scripts/`: `e2e_aiedge_matrix.sh` (full pipeline), `e2e_aiedge_8mb_track.sh` (truncated track), `e2e_er_e50_inventory_regression.sh` (regression).
 
@@ -223,6 +251,8 @@ Additional prefixes: `AIEDGE_PORTSCAN_*` (port scanning), `AIEDGE_LLM_CHAIN_*` (
 | `docs/aiedge_8mb_track_runbook.md` | 8MB truncated track operator guide |
 | `docs/e2e_terminator_aiedge_stage_control.md` | Terminator↔SCOUT stage control integration |
 | `docs/analyst_viewer_cockpit_mapping.md` | Viewer panel-to-artifact mapping |
+| `docs/upgrade_plan_v2.md` | Full v2.0 upgrade plan with appendices |
+| `docs/roadmap_llm_agent_integration.md` | LLM integration roadmap and strategy |
 
 ### Runtime Artifact Schemas (generated per-run, not committed)
 

@@ -14,7 +14,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-[![Stages](https://img.shields.io/badge/Pipeline-34_Stages-blueviolet?style=for-the-badge)]()
+[![Stages](https://img.shields.io/badge/Pipeline-41_Stages-blueviolet?style=for-the-badge)]()
 [![Zero Deps](https://img.shields.io/badge/Dependencies-Zero_(stdlib)-orange?style=for-the-badge)]()
 
 [![SARIF](https://img.shields.io/badge/SARIF-2.1.0-blue?style=for-the-badge&logo=github)]()
@@ -61,6 +61,9 @@
 | **Findings SHA-256 Manifest** | `stages/findings/stage.json` now carries per-artifact SHA-256 hashes for full evidence chain coverage |
 | **Handoff Validation** | `firmware_handoff.json` is validated via `validate_handoff()` before write -- missing keys are caught early |
 | **Exploit Stage Isolation** | Each exploit stage has independent import error handling; a single missing dependency no longer skips all five |
+| **v2.0: 7 New Analysis Stages** | Enhanced source detection, semantic classification, taint propagation, FP verification, adversarial triage, PoC refinement, chain construction (34 -> 41 stages) |
+| **v2.0: CLI Modularization** | `__main__.py` split from ~4500 lines into 7 focused modules (~660 lines entry point) |
+| **v2.0: FirmAE Benchmarking** | `benchmark_firmae.sh` for SCOUT vs FirmAE comparison; `unpack_firmae_dataset.sh` for dataset classification |
 
 ---
 
@@ -69,7 +72,7 @@
 ```
   1. Drop            2. Analyze              3. Collect               4. Review
   ─────────          ──────────              ──────────               ────────
-  firmware.bin  ──>  34-stage pipeline  ──>  SARIF findings      ──>  Web viewer
+  firmware.bin  ──>  41-stage pipeline  ──>  SARIF findings      ──>  Web viewer
                      runs automatically      CycloneDX SBOM+VEX      VS Code (SARIF)
                                              Evidence chain           GitHub Code Scanning
                                              SLSA attestation         TUI dashboard
@@ -77,7 +80,7 @@
 
 **Step 1** -- Point SCOUT at any firmware blob (or pre-extracted rootfs).
 
-**Step 2** -- The 34-stage pipeline runs end-to-end: unpacking, profiling, binary analysis, SBOM generation, CVE scanning, reachability analysis, security assessment, attack surface mapping, exploit chain construction, optional Ghidra decompilation, optional AFL++ fuzzing.
+**Step 2** -- The 41-stage pipeline runs end-to-end: unpacking, profiling, binary analysis, enhanced source detection, semantic classification, SBOM generation, CVE scanning, reachability analysis, taint propagation, FP verification, adversarial triage, security assessment, attack surface mapping, exploit chain construction, PoC refinement, optional Ghidra decompilation, optional AFL++ fuzzing.
 
 **Step 3** -- Outputs land in a structured run directory: SARIF 2.1.0 findings, CycloneDX 1.6 SBOM with VEX annotations, hash-anchored evidence chain, SLSA L2 provenance attestation, and executive Markdown report.
 
@@ -129,6 +132,8 @@
 | MCP Server (AI agent integration) | Yes | No | No | No |
 | LLM Triage + Synthesis | Yes | No | No | No |
 | Web Report Viewer | Yes | Yes | Yes | No |
+| Adversarial FP Reduction | Yes | No | No | No |
+| Taint Propagation (LLM) | Yes | No | No | No |
 | Zero pip Dependencies | Yes | No | No | No |
 
 ---
@@ -155,14 +160,18 @@
 
 ---
 
-## Pipeline (34 Stages)
+## Pipeline (41 Stages)
 
 ```
-Firmware --> Unpack --> Profile --> Inventory --> [Ghidra] --> SBOM --> CVE Scan
-    --> Reachability --> Security Assessment --> Endpoints --> Surfaces --> Graph
-    --> Attack Surface --> Findings --> LLM Triage --> LLM Synthesis
-    --> Emulation (3-tier) --> [Fuzzing] --> Exploit Chain --> PoC --> Verification
+Firmware --> Unpack --> Profile --> Inventory --> [Ghidra] --> Semantic Classification
+    --> SBOM --> CVE Scan --> Reachability --> Endpoints --> Surfaces
+    --> Enhanced Source --> Taint Propagation --> FP Verification --> Adversarial Triage
+    --> Security Assessment --> Graph --> Attack Surface --> Findings
+    --> LLM Triage --> LLM Synthesis --> Emulation (3-tier) --> [Fuzzing]
+    --> PoC Refinement --> Chain Construction --> Exploit Chain --> PoC --> Verification
 ```
+
+**New in v2.0:** `enhanced_source`, `semantic_classification`, `taint_propagation`, `fp_verification`, `adversarial_triage`, `poc_refinement`, `chain_construction`.
 
 Stages in `[brackets]` require optional external tools (Ghidra, AFL++/Docker).
 
@@ -183,7 +192,7 @@ Stages in `[brackets]` require optional external tools (Ghidra, AFL++/Docker).
 |  --> [Ghidra] --> LLM Triage --> LLM Synthesis                    |
 |  --> Emulation --> [Fuzzing] --> Exploit --> PoC --> Verify        |
 |                                                                   |
-|  34 stages . stage.json manifests . SHA-256 hashed artifacts      |
+|  41 stages . stage.json manifests . SHA-256 hashed artifacts      |
 |  Outputs: SARIF 2.1.0 + CycloneDX 1.6+VEX + SLSA L2 provenance  |
 +------------------------------------------------------------------+
 |                   Handoff (firmware_handoff.json)                  |
@@ -382,6 +391,10 @@ cosign verify-attestation --type slsaprovenance \
 # Quality gates
 ./scout quality-gate aiedge-runs/<run_id>
 ./scout release-quality-gate aiedge-runs/<run_id>
+
+# FirmAE benchmarking
+scripts/benchmark_firmae.sh                        # SCOUT vs FirmAE comparison
+scripts/unpack_firmae_dataset.sh                   # FirmAE dataset classifier
 ```
 
 </details>
@@ -403,6 +416,8 @@ cosign verify-attestation --type slsaprovenance \
 | [Determinism Policy](docs/determinism_policy.md) | Replay gate rules and relaxation policy |
 | [Quality SLO](docs/quality_slo.md) | Precision, recall, FPR thresholds |
 | [Runbook](docs/runbook.md) | Operator flow for digest-first review |
+| [Upgrade Plan v2](docs/upgrade_plan_v2.md) | Full v2.0 upgrade plan with appendices |
+| [LLM Agent Roadmap](docs/roadmap_llm_agent_integration.md) | LLM integration roadmap and strategy |
 
 ---
 

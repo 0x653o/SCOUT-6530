@@ -52,8 +52,37 @@
 - **웹 뷰어 UX 대폭 개선**: 싱글 패널 뷰(사이드바 클릭 → 해당 패널만 표시), KPI 바(Critical/High/Components/CVEs/Endpoints 상시 표시), SBOM/CVE/Reachability/Security Assessment 4개 패널 추가, 페이지네이션(SBOM 30/page, CVE 20/page), 그래프 Python 사전 레이아웃(150 노드 균형 선택, 호버 시 연결 정보 표시), viewer.html 1.5MB→567KB 경량화.
 - **공유 유틸리티** (`path_safety.py`): `assert_under_dir`, `rel_to_run_dir`, `sha256_file`, `sha256_text` 공유 모듈.
 - 파이프라인 29 → 34 stages: `ghidra_analysis`, `sbom`, `cve_scan`, `reachability`, `fuzzing` 추가.
+- 파이프라인 34 → 41 stages (v2.0): `enhanced_source`, `semantic_classification`, `taint_propagation`, `fp_verification`, `adversarial_triage`, `poc_refinement`, `chain_construction` 추가.
 
-## 최근 개선 (2026-03)
+## v2.0 업그레이드 (2026-03-27)
+
+### 신규 스테이지 (34 → 41)
+- **`enhanced_source`** (`enhanced_source.py`): `.dynstr` INPUT_APIS 스캔 (14개 API). LLM 미사용, 비용 $0.
+- **`semantic_classification`** (`semantic_classifier.py`): 3-pass 함수 분류기 (static → haiku → sonnet). 보안 관련 함수 자동 분류.
+- **`taint_propagation`** (`taint_propagation.py`): LLM 기반 inter-procedural taint 분석. 함수 레벨 캐시로 중복 호출 방지.
+- **`fp_verification`** (`fp_verification.py`): 3-패턴 FP 제거 (sanitizer/non-propagating/sysfile). LLM 미사용, 비용 $0.
+- **`adversarial_triage`** (`adversarial_triage.py`): Advocate/Critic LLM 토론을 통한 FPR 감소.
+- **`poc_refinement`** (`poc_refinement.py`): 퍼징 시드 기반 반복적 PoC 생성 (최대 5회 시도).
+- **`chain_construction`** (`chain_constructor.py`): 익스플로잇 체인 조립 (same-binary + IPC cross-binary).
+
+### CLI 모듈화
+- **`__main__.py` 분리**: ~4,500줄 → 7개 모듈 (~660줄 진입점).
+  - `cli_common.py`: 공유 유틸리티, 상수, 헬퍼 함수
+  - `cli_serve.py`: `serve` 서브커맨드 (웹 리포트 뷰어)
+  - `cli_tui_data.py`: TUI 데이터 로딩 및 처리
+  - `cli_tui_render.py`: TUI 렌더링 및 표시 로직
+  - `cli_tui.py`: TUI 서브커맨드 오케스트레이션
+  - `cli_parser.py`: 인자 파서 구축 (`_build_parser()`)
+
+### 신규 스크립트
+- **`scripts/benchmark_firmae.sh`**: SCOUT vs FirmAE 벤치마크 비교 실행.
+- **`scripts/unpack_firmae_dataset.sh`**: FirmAE 데이터셋 분류 및 언패커.
+
+### 신규 문서
+- **`docs/upgrade_plan_v2.md`**: v2.0 전체 업그레이드 계획 및 부록.
+- **`docs/roadmap_llm_agent_integration.md`**: LLM 통합 로드맵 및 전략.
+
+## 이전 개선 (2026-03 초)
 
 ### Phase 1: 버그 수정
 - **Exploit stage import 격리** (`run.py`): 5개 exploit stage를 단일 try/except에서 개별 try/except ImportError 블록으로 분리. 각 stage 실패가 독립적으로 limitation에 기록됨. GhidraAnalysisStage() 직접 호출 버그 수정 (make_ghidra_analysis_stage factory 사용).
@@ -90,8 +119,10 @@
 
 1) Reachability 컴포넌트-노드 ID 매칭 로직 개선 (CPE 이름 → graph 노드 ID 정규화)
 2) 벤더 포맷 전용 extraction chain 확장 (QNAP/Synology/ASUS 계열 깊은 중첩 포맷)
-3) FirmAE 호환 펌웨어 커버리지 확대 (Tier 1 에뮬레이션 성공률 향상)
+3) FirmAE 호환 펌웨어 커버리지 확대 (Tier 1 에뮬레이션 성공률 향상) -- `benchmark_firmae.sh`로 벤치마킹 가능
 4) Ghidra dataflow 결과를 source-sink 그래프와 findings confidence에 통합
-5) 퍼징 크래시를 exploit_autopoc PoC seed로 자동 연계
+5) ~~퍼징 크래시를 exploit_autopoc PoC seed로 자동 연계~~ -- v2.0 `poc_refinement` 스테이지로 해결
 6) Public benchmark corpus 확장 (현재 seed fixture → 실제 공개 펌웨어 corpus)
 7) 남은 `_assert_under_dir()` 로컬 복사본을 `path_safety.py` import로 통합 (26파일)
+8) Semantic classification 결과를 taint propagation 초기 seed로 활용하는 피드백 루프 강화
+9) Adversarial triage 라운드 수/모델 티어 자동 조정 (finding 수 기반)

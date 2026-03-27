@@ -544,6 +544,90 @@ def _make_fuzzing_stage(
     return make_fuzz_campaign_stage(info, source_input_path, remaining_s, no_llm)
 
 
+def _make_semantic_classification_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    from .semantic_classifier import SemanticClassifierStage
+
+    _ = info, source_input_path, remaining_s
+    return SemanticClassifierStage(no_llm=no_llm)
+
+
+def _make_enhanced_source_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    from .enhanced_source import EnhancedSourceStage
+
+    _ = info, source_input_path, remaining_s
+    return EnhancedSourceStage(no_llm=no_llm)
+
+
+def _make_taint_propagation_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    from .taint_propagation import TaintPropagationStage
+
+    _ = info, source_input_path, remaining_s
+    return TaintPropagationStage(no_llm=no_llm)
+
+
+def _make_fp_verification_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    from .fp_verification import FPVerificationStage
+
+    _ = info, source_input_path, remaining_s
+    return FPVerificationStage(no_llm=no_llm)
+
+
+def _make_adversarial_triage_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    from .adversarial_triage import AdversarialTriageStage
+
+    _ = info, source_input_path, remaining_s
+    return AdversarialTriageStage(no_llm=no_llm)
+
+
+def _make_poc_refinement_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    from .poc_refinement import PoCRefinementStage
+
+    _ = info, source_input_path, remaining_s
+    return PoCRefinementStage(no_llm=no_llm)
+
+
+def _make_chain_construction_stage(
+    info: _RunInfoLike,
+    source_input_path: str | None,
+    remaining_s: Callable[[], float],
+    no_llm: bool,
+) -> Stage:
+    from .chain_constructor import ChainConstructorStage
+
+    _ = info, source_input_path, remaining_s
+    return ChainConstructorStage(no_llm=no_llm)
+
+
 # All stages registered here are included in the full pipeline in run.py:analyze_run().
 # firmware_lineage runs after ExtractionStage (depends on extraction output).
 # fuzzing runs in the exploit section (manifest_profile == "exploit") near DynamicValidationStage.
@@ -561,11 +645,16 @@ _STAGE_FACTORIES: dict[str, StageFactory] = {
     "firmware_profile": _make_firmware_profile_stage,
     "inventory": _make_inventory_stage,
     "ghidra_analysis": _make_ghidra_analysis_stage,
+    "semantic_classification": _make_semantic_classification_stage,
     "sbom": _make_sbom_stage,
     "cve_scan": _make_cve_scan_stage,
     "reachability": _make_reachability_stage,
     "endpoints": _make_endpoints_stage,
     "surfaces": _make_surfaces_stage,
+    "enhanced_source": _make_enhanced_source_stage,
+    "taint_propagation": _make_taint_propagation_stage,
+    "fp_verification": _make_fp_verification_stage,
+    "adversarial_triage": _make_adversarial_triage_stage,
     "web_ui": _make_web_ui_stage,
     "graph": _make_graph_stage,
     "attack_surface": _make_attack_surface_stage,
@@ -577,6 +666,8 @@ _STAGE_FACTORIES: dict[str, StageFactory] = {
     "emulation": _make_emulation_stage,
     "dynamic_validation": _make_dynamic_validation_stage,
     "fuzzing": _make_fuzzing_stage,
+    "poc_refinement": _make_poc_refinement_stage,
+    "chain_construction": _make_chain_construction_stage,
     "exploit_gate": _make_exploit_gate_stage,
     "exploit_chain": _make_exploit_chain_stage,
     "exploit_autopoc": _make_exploit_autopoc_stage,

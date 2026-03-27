@@ -14,7 +14,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-[![Stages](https://img.shields.io/badge/Pipeline-34_Stages-blueviolet?style=for-the-badge)]()
+[![Stages](https://img.shields.io/badge/Pipeline-41_Stages-blueviolet?style=for-the-badge)]()
 [![Zero Deps](https://img.shields.io/badge/Dependencies-Zero_(stdlib)-orange?style=for-the-badge)]()
 
 [![SARIF](https://img.shields.io/badge/SARIF-2.1.0-blue?style=for-the-badge&logo=github)]()
@@ -61,6 +61,9 @@
 | **Findings SHA-256 매니페스트** | `stages/findings/stage.json`에 아티팩트별 SHA-256 해시 포함 -- 증거 체인 완전 커버리지 |
 | **Handoff 유효성 검증** | `firmware_handoff.json` 기록 전 `validate_handoff()`로 필수 키 검증 -- 누락 조기 탐지 |
 | **Exploit Stage 격리** | 각 exploit stage가 독립적 import error 처리 -- 단일 의존성 누락이 5개 stage를 모두 건너뛰지 않음 |
+| **v2.0: 7개 신규 분석 스테이지** | Enhanced source 탐지, semantic classification, taint propagation, FP 검증, adversarial triage, PoC refinement, chain construction (34 -> 41 스테이지) |
+| **v2.0: CLI 모듈화** | `__main__.py`를 ~4500줄에서 7개 모듈로 분리 (~660줄 진입점) |
+| **v2.0: FirmAE 벤치마킹** | `benchmark_firmae.sh`로 SCOUT vs FirmAE 비교; `unpack_firmae_dataset.sh`로 데이터셋 분류 |
 
 ---
 
@@ -69,7 +72,7 @@
 ```
   1. 입력             2. 분석                 3. 수집                  4. 검토
   ─────────          ──────────              ──────────               ────────
-  firmware.bin  -->  34단계 파이프라인  -->  SARIF findings      -->  웹 뷰어
+  firmware.bin  -->  41단계 파이프라인  -->  SARIF findings      -->  웹 뷰어
                      자동 실행               CycloneDX SBOM+VEX      VS Code (SARIF)
                                              증거 체인                GitHub Code Scanning
                                              SLSA attestation         TUI 대시보드
@@ -77,7 +80,7 @@
 
 **Step 1** -- 펌웨어 바이너리(또는 사전 추출된 rootfs)를 SCOUT에 지정합니다.
 
-**Step 2** -- 34단계 파이프라인이 자동 실행: 압축 해제, 프로파일링, 바이너리 분석, SBOM 생성, CVE 스캔, 도달성 분석, 보안 평가, 공격면 매핑, 익스플로잇 체인 구성, Ghidra 디컴파일(선택), AFL++ 퍼징(선택).
+**Step 2** -- 41단계 파이프라인이 자동 실행: 압축 해제, 프로파일링, 바이너리 분석, enhanced source 탐지, semantic classification, SBOM 생성, CVE 스캔, 도달성 분석, taint propagation, FP 검증, adversarial triage, 보안 평가, 공격면 매핑, 익스플로잇 체인 구성, PoC refinement, Ghidra 디컴파일(선택), AFL++ 퍼징(선택).
 
 **Step 3** -- 구조화된 run 디렉토리에 결과 출력: SARIF 2.1.0 findings, CycloneDX 1.6 SBOM + VEX, 해시 기반 증거 체인, SLSA L2 provenance attestation, 임원용 Markdown 보고서.
 
@@ -129,6 +132,8 @@
 | MCP 서버 (AI 에이전트 연동) | Yes | No | No | No |
 | LLM 트리아지 + 합성 | Yes | No | No | No |
 | 웹 리포트 뷰어 | Yes | Yes | Yes | No |
+| Adversarial FP 제거 | Yes | No | No | No |
+| Taint Propagation (LLM) | Yes | No | No | No |
 | pip 의존성 제로 | Yes | No | No | No |
 
 ---
@@ -155,14 +160,18 @@
 
 ---
 
-## 파이프라인 (34단계)
+## 파이프라인 (41단계)
 
 ```
-Firmware --> Unpack --> Profile --> Inventory --> [Ghidra] --> SBOM --> CVE Scan
-    --> Reachability --> Security Assessment --> Endpoints --> Surfaces --> Graph
-    --> Attack Surface --> Findings --> LLM Triage --> LLM Synthesis
-    --> Emulation (3-tier) --> [Fuzzing] --> Exploit Chain --> PoC --> Verification
+Firmware --> Unpack --> Profile --> Inventory --> [Ghidra] --> Semantic Classification
+    --> SBOM --> CVE Scan --> Reachability --> Endpoints --> Surfaces
+    --> Enhanced Source --> Taint Propagation --> FP Verification --> Adversarial Triage
+    --> Security Assessment --> Graph --> Attack Surface --> Findings
+    --> LLM Triage --> LLM Synthesis --> Emulation (3-tier) --> [Fuzzing]
+    --> PoC Refinement --> Chain Construction --> Exploit Chain --> PoC --> Verification
 ```
+
+**v2.0 신규:** `enhanced_source`, `semantic_classification`, `taint_propagation`, `fp_verification`, `adversarial_triage`, `poc_refinement`, `chain_construction`.
 
 `[괄호]` 안의 스테이지는 선택적 외부 도구(Ghidra, AFL++/Docker)가 필요합니다.
 
@@ -183,7 +192,7 @@ Firmware --> Unpack --> Profile --> Inventory --> [Ghidra] --> SBOM --> CVE Scan
 |  --> [Ghidra] --> LLM 트리아지 --> LLM 합성                        |
 |  --> 에뮬레이션 --> [퍼징] --> 익스플로잇 --> PoC --> 검증          |
 |                                                                    |
-|  34단계 . stage.json 매니페스트 . SHA-256 해시 아티팩트             |
+|  41단계 . stage.json 매니페스트 . SHA-256 해시 아티팩트             |
 |  출력: SARIF 2.1.0 + CycloneDX 1.6+VEX + SLSA L2 provenance      |
 +------------------------------------------------------------------+
 |                   Handoff (firmware_handoff.json)                   |
@@ -382,6 +391,10 @@ cosign verify-attestation --type slsaprovenance \
 # 품질 게이트
 ./scout quality-gate aiedge-runs/<run_id>
 ./scout release-quality-gate aiedge-runs/<run_id>
+
+# FirmAE 벤치마킹
+scripts/benchmark_firmae.sh                        # SCOUT vs FirmAE 비교
+scripts/unpack_firmae_dataset.sh                   # FirmAE 데이터셋 분류기
 ```
 
 </details>
@@ -403,6 +416,8 @@ cosign verify-attestation --type slsaprovenance \
 | [Verified Chain](docs/verified_chain_contract.md) | verified chain 증거 요구사항 |
 | [Duplicate Gate](docs/aiedge_duplicate_gate_contract.md) | 크로스런 중복 억제 규칙 |
 | [Runbook](docs/runbook.md) | digest-first 검토 운영 흐름 |
+| [Upgrade Plan v2](docs/upgrade_plan_v2.md) | v2.0 업그레이드 계획 및 부록 |
+| [LLM Agent 로드맵](docs/roadmap_llm_agent_integration.md) | LLM 통합 로드맵 및 전략 |
 
 ---
 

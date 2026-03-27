@@ -253,8 +253,10 @@ def test_tui_cli_watch_renders_only_when_snapshot_changes(
         if sleep_count["value"] >= 3:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "_build_tui_snapshot_lines", fake_snapshot_lines)
-    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    from aiedge import cli_tui as _cli_tui_mod
+
+    monkeypatch.setattr(_cli_tui_mod, "_build_tui_snapshot_lines", fake_snapshot_lines)
+    monkeypatch.setattr(_cli_tui_mod.time, "sleep", fake_sleep)
 
     rc = main(["tui", str(run_dir), "--watch", "--interval-s", "0.1"])
     captured = capsys.readouterr()

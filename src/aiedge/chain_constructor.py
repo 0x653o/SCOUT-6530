@@ -1,0 +1,813 @@
+from __future__ import annotations
+
+"""Exploit chain construction stage.
+
+Builds multi-step exploit chains from individual findings by analyzing
+same-binary source-to-sink paths and cross-binary IPC edges from the
+communication graph.  Uses LLM (opus tier) for chain reasoning when
+available; falls back to static-only chain assembly under ``--no-llm``.
+"""
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import cast
+
+from .llm_driver import resolve_driver
+from .path_safety import assert_under_dir
+from .schema import JsonValue
+from .stage import StageContext, StageOutcome, StageStatus
+
+_SCHEMA_VERSION = "chain-construction-v1"
+_LLM_TIMEOUT_S = 180.0
+_LLM_MAX_ATTEMPTS = 3
+_RETRYABLE_TOKENS: tuple[str, ...] = (
+    "stream disconnected",
+    "error sending request",
+    "connection reset",
+    "connection refused",
+    "timed out",
+    "timeout",
+    "temporary failure",
+    "503",
+    "502",
+    "429",
+)
+
+_IPC_EDGE_TYPES: frozenset[str] = frozenset({
+    "ipc_unix_socket",
+    "ipc_dbus",
+    "ipc_shm",
+    "ipc_pipe",
+    "ipc_exec_chain",
+})
+
+_MAX_CHAINS = 50
+
+
+def _load_json_file(path: Path) -> object | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _clamp01(v: float) -> float:
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return float(v)
+
+
+def _build_chain_prompt(
+    findings_json: str,
+    ipc_edges_json: str,
+    shared_strings_json: str,
+) -> str:
+    return (
+        "You are an expert firmware exploit chain analyst.\n"
+        "Given individual findings, IPC communication edges, and shared\n"
+        "string constants, construct multi-step exploit chains from\n"
+        "external input to code execution.\n\n"
+        "## Individual Findings\n"
+        f"{findings_json}\n\n"
+        "## IPC Communication Edges\n"
+        f"{ipc_edges_json}\n\n"
+        "## Shared String Constants Between Binaries\n"
+        f"{shared_strings_json}\n\n"
+        "## Rules\n"
+        "- Each chain must start from an external input (network, web, etc.)\n"
+        "- Chain steps should be connected via IPC or shared memory\n"
+        "- End goal: code execution, privilege escalation, or data exfiltration\n"
+        "- Identify missing evidence for each chain\n"
+        "- Rate confidence based on evidence strength\n\n"
+        "## Output Format\n"
+        "Return ONLY a JSON object (no markdown fences):\n"
+        "{\n"
+        '  "chains": [\n'
+        "    {\n"
+        '      "id": "<chain_id>",\n'
+        '      "description": "<chain description>",\n'
+        '      "steps": [\n'
+        "        {\n"
+        '          "finding_id": "<id or description>",\n'
+        '          "primitive": "<what this step achieves>",\n'
+        '          "evidence": "<supporting evidence>"\n'
+        "        }\n"
+        "      ],\n"
+        '      "confidence": 0.0-1.0,\n'
+        '      "missing_evidence": ["<what would strengthen this chain>"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+
+
+def _parse_json_response(stdout: str) -> dict[str, object] | None:
+    text = stdout.strip()
+    if not text:
+        return None
+    fences = re.findall(
+        r"```(?:json)?\s*\n(.*?)```",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for fence in fences:
+        try:
+            obj = json.loads(fence)
+            if isinstance(obj, dict):
+                return cast(dict[str, object], obj)
+        except (json.JSONDecodeError, ValueError):
+            continue
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return cast(dict[str, object], obj)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def _truncate_json(data: object, *, max_chars: int = 6000) -> str:
+    text = json.dumps(data, indent=2, ensure_ascii=True)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+@dataclass(frozen=True)
+class ChainConstructorStage:
+    """Build exploit chains from individual findings."""
+
+    no_llm: bool = False
+
+    @property
+    def name(self) -> str:
+        return "chain_construction"
+
+    def run(self, ctx: StageContext) -> StageOutcome:
+        run_dir = ctx.run_dir
+        stage_dir = run_dir / "stages" / "chain_construction"
+        out_json = stage_dir / "chains.json"
+
+        assert_under_dir(run_dir, stage_dir)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        assert_under_dir(run_dir, out_json)
+
+        limitations: list[str] = []
+
+        # --- Load all findings from multiple sources ---
+        findings: list[dict[str, object]] = []
+        findings_sources = [
+            run_dir / "stages" / "adversarial_triage" / "triaged_findings.json",
+            run_dir / "stages" / "fp_verification" / "verified_alerts.json",
+            run_dir / "stages" / "findings" / "findings.json",
+        ]
+        for fpath in findings_sources:
+            fdata = _load_json_file(fpath)
+            if not isinstance(fdata, dict):
+                continue
+            fd = cast(dict[str, object], fdata)
+            for key in ("triaged_findings", "verified_alerts", "findings"):
+                items_any = fd.get(key)
+                if isinstance(items_any, list):
+                    for item in cast(list[object], items_any):
+                        if isinstance(item, dict):
+                            findings.append(cast(dict[str, object], item))
+                    break
+
+        # Always load pattern_scan.json (has 62 findings with family/evidence)
+        ps_path = run_dir / "stages" / "findings" / "pattern_scan.json"
+        ps_data = _load_json_file(ps_path)
+        if isinstance(ps_data, dict):
+            ps_findings_any = cast(dict[str, object], ps_data).get("findings")
+            if isinstance(ps_findings_any, list):
+                for item in cast(list[object], ps_findings_any):
+                    if not isinstance(item, dict):
+                        continue
+                    ps_item = cast(dict[str, object], item)
+                    # Normalize: extract binary path from evidence[0].path
+                    if "binary" not in ps_item:
+                        ev_list = ps_item.get("evidence")
+                        if isinstance(ev_list, list) and ev_list:
+                            first_ev = ev_list[0]
+                            if isinstance(first_ev, dict):
+                                ev_path = cast(
+                                    dict[str, object], first_ev
+                                ).get("path")
+                                if isinstance(ev_path, str) and ev_path:
+                                    ps_item["binary"] = ev_path
+                    findings.append(ps_item)
+
+        # Always load exploit_candidates.json
+        ec_path = run_dir / "stages" / "findings" / "exploit_candidates.json"
+        ec_data = _load_json_file(ec_path)
+        if isinstance(ec_data, dict):
+            ec_items = cast(dict[str, object], ec_data).get("candidates")
+            if isinstance(ec_items, list):
+                for item in cast(list[object], ec_items):
+                    if not isinstance(item, dict):
+                        continue
+                    ec_item = cast(dict[str, object], item)
+                    # Normalize: use 'path' field as 'binary'
+                    if "binary" not in ec_item:
+                        path_any = ec_item.get("path")
+                        if isinstance(path_any, str) and path_any:
+                            ec_item["binary"] = path_any
+                    findings.append(ec_item)
+
+        # Fallback 1: taint_propagation alerts
+        if not findings:
+            taint_alerts_path = (
+                run_dir / "stages" / "taint_propagation" / "alerts.json"
+            )
+            taint_alerts_data = _load_json_file(taint_alerts_path)
+            if isinstance(taint_alerts_data, dict):
+                ta_any = cast(dict[str, object], taint_alerts_data).get("alerts")
+                if isinstance(ta_any, list):
+                    for item in cast(list[object], ta_any):
+                        if isinstance(item, dict):
+                            findings.append(cast(dict[str, object], item))
+                    if findings:
+                        limitations.append(
+                            "Using taint_propagation alerts as findings "
+                            "(no findings/triage stages available)"
+                        )
+
+        # Fallback 2: enhanced_source sources
+        if not findings:
+            es_path = run_dir / "stages" / "enhanced_source" / "sources.json"
+            es_data = _load_json_file(es_path)
+            if isinstance(es_data, dict):
+                es_any = cast(dict[str, object], es_data).get("sources")
+                if isinstance(es_any, list):
+                    for item in cast(list[object], es_any):
+                        if isinstance(item, dict):
+                            findings.append(cast(dict[str, object], item))
+                    if findings:
+                        limitations.append(
+                            "Using enhanced_source data as findings "
+                            "(no taint/findings stages available)"
+                        )
+
+        # Always load binary_analysis.json for cross-binary chain data
+        ba_chain_path = run_dir / "stages" / "inventory" / "binary_analysis.json"
+        ba_chain_data = _load_json_file(ba_chain_path)
+        ba_binaries: list[dict[str, object]] = []
+        if isinstance(ba_chain_data, dict):
+            ba_hits_any = cast(dict[str, object], ba_chain_data).get("hits")
+            if isinstance(ba_hits_any, list):
+                for hit_any in cast(list[object], ba_hits_any):
+                    if not isinstance(hit_any, dict):
+                        continue
+                    hit = cast(dict[str, object], hit_any)
+                    syms: set[str] = set()
+                    ms_any = hit.get("matched_symbols")
+                    if isinstance(ms_any, list):
+                        for s in cast(list[object], ms_any):
+                            if isinstance(s, str):
+                                syms.add(s)
+                    sd_any = hit.get("symbol_details")
+                    if isinstance(sd_any, list):
+                        for sd_item in cast(list[object], sd_any):
+                            if isinstance(sd_item, dict):
+                                sn = cast(dict[str, object], sd_item).get("symbol")
+                                if isinstance(sn, str):
+                                    syms.add(sn)
+                    if syms:
+                        ba_binaries.append({
+                            "binary": str(hit.get("path", "")),
+                            "symbols": sorted(syms),
+                            "arch": str(hit.get("arch", "unknown")),
+                            "hardening": hit.get("hardening", {}),
+                        })
+
+        # Supplement findings from binary_analysis (always, not just fallback)
+        if ba_binaries:
+            existing_bins = {
+                str(f.get("binary", "") or f.get("source_binary", ""))
+                for f in findings
+            }
+            for bbin in ba_binaries:
+                bin_path = str(bbin.get("binary", ""))
+                bin_syms = set(
+                    cast(list[str], bbin.get("symbols", []))
+                )
+                sink_syms = bin_syms & {
+                    "system", "popen", "execve", "strcpy", "sprintf",
+                    "strcat", "vsprintf", "gets",
+                }
+                input_syms = bin_syms & {
+                    "recv", "recvfrom", "read", "fread", "fgets",
+                    "gets", "getenv", "scanf", "sscanf", "nvram_get",
+                    "websGetVar", "httpGetEnv", "cJSON_GetObjectItem",
+                }
+                if sink_syms and bin_path not in existing_bins:
+                    findings.append({
+                        "source_binary": bin_path,
+                        "binary": bin_path,
+                        "sink_symbol": sorted(sink_syms)[0],
+                        "source_api": sorted(input_syms)[0] if input_syms else "",
+                        "matched_symbols": sorted(bin_syms),
+                        "matched_input_apis": sorted(input_syms),
+                        "matched_sink_apis": sorted(sink_syms),
+                        "confidence": 0.40,
+                        "method": "binary_analysis",
+                        "hardening": bbin.get("hardening", {}),
+                    })
+                    existing_bins.add(bin_path)
+
+        if not findings:
+            limitations.append("No findings available for chain construction")
+
+        # --- Load communication graph (IPC edges) ---
+        graph_path = run_dir / "stages" / "graph" / "communication_graph.json"
+        graph_data = _load_json_file(graph_path)
+        ipc_edges: list[dict[str, object]] = []
+        if isinstance(graph_data, dict):
+            edges_any = cast(dict[str, object], graph_data).get("edges")
+            if isinstance(edges_any, list):
+                for edge in cast(list[object], edges_any):
+                    if not isinstance(edge, dict):
+                        continue
+                    edge_obj = cast(dict[str, object], edge)
+                    edge_type = str(edge_obj.get("type", ""))
+                    if edge_type.lower() in _IPC_EDGE_TYPES:
+                        ipc_edges.append(edge_obj)
+        if not ipc_edges:
+            limitations.append(
+                "No IPC edges found in communication graph"
+            )
+
+        # --- Load source_sink_graph for additional path data ---
+        ssg_chain_path = run_dir / "stages" / "surfaces" / "source_sink_graph.json"
+        ssg_chain_data = _load_json_file(ssg_chain_path)
+        ssg_chain_paths: list[dict[str, object]] = []
+        if isinstance(ssg_chain_data, dict):
+            ssg_p_any = cast(dict[str, object], ssg_chain_data).get("paths")
+            if isinstance(ssg_p_any, list):
+                for p in cast(list[object], ssg_p_any):
+                    if isinstance(p, dict):
+                        ssg_chain_paths.append(cast(dict[str, object], p))
+
+        # --- Load taint propagation data ---
+        taint_path = run_dir / "stages" / "taint_propagation" / "taint_results.json"
+        taint_data = _load_json_file(taint_path)
+        taint_results: list[dict[str, object]] = []
+        if isinstance(taint_data, dict):
+            results_any = cast(dict[str, object], taint_data).get("results")
+            if isinstance(results_any, list):
+                for r in cast(list[object], results_any):
+                    if isinstance(r, dict):
+                        taint_results.append(cast(dict[str, object], r))
+
+        # Also use taint alerts as additional findings if available
+        taint_alerts_chain = (
+            run_dir / "stages" / "taint_propagation" / "alerts.json"
+        )
+        ta_chain_data = _load_json_file(taint_alerts_chain)
+        if isinstance(ta_chain_data, dict):
+            ta_items = cast(dict[str, object], ta_chain_data).get("alerts")
+            if isinstance(ta_items, list):
+                existing_bins = {
+                    str(f.get("binary", "") or f.get("source_binary", ""))
+                    for f in findings
+                }
+                for ta_item in cast(list[object], ta_items):
+                    if isinstance(ta_item, dict):
+                        ta_obj = cast(dict[str, object], ta_item)
+                        ta_bin = str(ta_obj.get("source_binary", ""))
+                        # Only add if this binary isn't already in findings
+                        if ta_bin and ta_bin not in existing_bins:
+                            findings.append(ta_obj)
+                            existing_bins.add(ta_bin)
+
+        # Known dangerous sink symbols
+        _SINK_SYMBOLS: frozenset[str] = frozenset({
+            "system", "popen", "execve", "execv", "execl", "execlp",
+            "strcpy", "strcat", "sprintf", "vsprintf", "gets",
+            "doSystemCmd", "twsystem", "doSystem",
+        })
+        # Known input source symbols
+        _INPUT_SYMBOLS: frozenset[str] = frozenset({
+            "recv", "recvfrom", "recvmsg", "read", "fread", "fgets",
+            "gets", "getenv", "scanf", "sscanf", "fscanf",
+            "websGetVar", "httpGetEnv", "nvram_get",
+            "acosNvramConfig_get", "json_object_get_string",
+            "cJSON_GetObjectItem", "getParameter", "wp_getVar",
+        })
+        # Finding families that indicate sink-like behavior
+        _SINK_FAMILIES: frozenset[str] = frozenset({
+            "cmd_exec_injection_risk", "buffer_overflow", "format_string",
+            "command_injection", "exec_sink", "unsafe_function",
+        })
+        # Finding families that indicate source-like behavior
+        _SOURCE_FAMILIES: frozenset[str] = frozenset({
+            "credential_material_exposure", "network_io", "input",
+            "source", "user_input",
+        })
+
+        def _is_source(f: dict[str, object]) -> bool:
+            """Check if a finding represents an external input source."""
+            if str(f.get("source_api", "")):
+                return True
+            f_type = str(f.get("type", "")).lower()
+            if f_type in ("input", "source", "network_io"):
+                return True
+            # Check matched_input_apis
+            input_apis = f.get("matched_input_apis")
+            if isinstance(input_apis, list) and input_apis:
+                return True
+            # Check matched_symbols for input APIs
+            msyms = f.get("matched_symbols")
+            if isinstance(msyms, list):
+                for sym in cast(list[object], msyms):
+                    if isinstance(sym, str) and sym in _INPUT_SYMBOLS:
+                        return True
+            return False
+
+        def _is_sink(f: dict[str, object]) -> bool:
+            """Check if a finding represents a dangerous sink."""
+            if str(f.get("sink_symbol", "")):
+                return True
+            f_type = str(f.get("type", "")).lower()
+            if f_type in ("command_injection", "buffer_overflow", "exec_sink"):
+                return True
+            # Check family field from pattern_scan findings
+            family = str(f.get("family", "")).lower()
+            if family in _SINK_FAMILIES:
+                return True
+            # Check matched_sink_apis
+            sink_apis = f.get("matched_sink_apis")
+            if isinstance(sink_apis, list) and sink_apis:
+                return True
+            # Check matched_symbols for sink APIs
+            msyms = f.get("matched_symbols")
+            if isinstance(msyms, list):
+                for sym in cast(list[object], msyms):
+                    if isinstance(sym, str) and sym in _SINK_SYMBOLS:
+                        return True
+            return False
+
+        def _finding_label(f: dict[str, object], role: str) -> str:
+            """Extract a human-readable label for a finding."""
+            if role == "source":
+                api = str(f.get("source_api", ""))
+                if api:
+                    return api
+                apis = f.get("matched_input_apis")
+                if isinstance(apis, list) and apis:
+                    return str(apis[0])
+                return str(f.get("api", "input"))
+            # sink
+            sym = str(f.get("sink_symbol", ""))
+            if sym:
+                return sym
+            family = str(f.get("family", ""))
+            if family:
+                return family
+            apis = f.get("matched_sink_apis")
+            if isinstance(apis, list) and apis:
+                return str(apis[0])
+            return "sink"
+
+        def _finding_id(f: dict[str, object]) -> str:
+            """Extract a finding identifier."""
+            for key in ("finding_id", "id", "candidate_id"):
+                v = f.get(key)
+                if isinstance(v, str) and v:
+                    return v
+            return _finding_label(f, "sink")
+
+        # --- Step 1: Same-binary chain assembly (always runs) ---
+        # Group findings by binary
+        findings_by_binary: dict[str, list[dict[str, object]]] = {}
+        for finding in findings:
+            binary = str(
+                finding.get("binary", "")
+                or finding.get("source_binary", "")
+                or finding.get("target_binary", "")
+            )
+            if not binary:
+                continue
+            findings_by_binary.setdefault(binary, []).append(finding)
+
+        static_chains: list[dict[str, JsonValue]] = []
+        chain_id = 0
+        for binary, bin_findings in findings_by_binary.items():
+            # Classify findings as sources and sinks using robust detection
+            sources = [f for f in bin_findings if _is_source(f)]
+            sinks = [f for f in bin_findings if _is_sink(f)]
+
+            # Build source->sink chains when both exist
+            if sources and sinks:
+                for src in sources[:3]:
+                    for sink in sinks[:3]:
+                        if chain_id >= _MAX_CHAINS:
+                            break
+                        chain_id += 1
+                        src_conf_raw = src.get("confidence", 0.5)
+                        src_conf = (
+                            0.5 if isinstance(src_conf_raw, str)
+                            else float(src_conf_raw)
+                        )
+                        sink_conf_raw = sink.get("confidence", 0.5)
+                        sink_conf = (
+                            0.5 if isinstance(sink_conf_raw, str)
+                            else float(sink_conf_raw)
+                        )
+                        combined = _clamp01(
+                            (src_conf + sink_conf) / 2.0 * 0.8
+                        )
+                        src_label = _finding_label(src, "source")
+                        sink_label = _finding_label(sink, "sink")
+                        static_chains.append({
+                            "id": f"chain_{chain_id:03d}",
+                            "description": (
+                                f"Same-binary chain in {binary}: "
+                                f"{src_label} -> {sink_label}"
+                            ),
+                            "binary": binary,
+                            "chain_type": "same_binary",
+                            "steps": cast(list[JsonValue], cast(list[object], [
+                                {
+                                    "finding_id": _finding_id(src),
+                                    "primitive": "external_input",
+                                    "evidence": str(
+                                        src.get("path_description", "static_reference")
+                                    ),
+                                },
+                                {
+                                    "finding_id": _finding_id(sink),
+                                    "primitive": sink_label,
+                                    "evidence": str(
+                                        sink.get("path_description", "static_reference")
+                                    ),
+                                },
+                            ])),
+                            "confidence": combined,
+                            "missing_evidence": cast(list[JsonValue], cast(list[object], [
+                                "Dynamic validation of data flow",
+                                "Runtime confirmation of exploitability",
+                            ])),
+                            "method": "static",
+                        })
+
+            # Build sink-only chains: vuln + weak hardening = exploitable
+            elif sinks and not sources and len(sinks) >= 1:
+                for sink in sinks[:3]:
+                    if chain_id >= _MAX_CHAINS:
+                        break
+                    # Check hardening weakness
+                    hardening = sink.get("hardening")
+                    if not isinstance(hardening, dict):
+                        # Try to find hardening from ba_binaries
+                        for bbin in ba_binaries:
+                            if str(bbin.get("binary", "")) == binary:
+                                hardening = bbin.get("hardening", {})
+                                break
+                    if not isinstance(hardening, dict):
+                        hardening = {}
+                    h = cast(dict[str, object], hardening)
+                    no_pie = not bool(h.get("pie", True))
+                    no_canary = not bool(h.get("canary", True))
+
+                    chain_id += 1
+                    sink_label = _finding_label(sink, "sink")
+                    weakness_parts: list[str] = []
+                    if no_pie:
+                        weakness_parts.append("no PIE")
+                    if no_canary:
+                        weakness_parts.append("no canary")
+                    weakness_desc = (
+                        " + ".join(weakness_parts) if weakness_parts
+                        else "default hardening"
+                    )
+                    conf_raw = sink.get("confidence", 0.4)
+                    base_conf = (
+                        0.4 if isinstance(conf_raw, str) else float(conf_raw)
+                    )
+                    # Boost confidence for weak hardening
+                    if no_pie and no_canary:
+                        base_conf = min(base_conf + 0.10, 0.55)
+                    elif no_pie or no_canary:
+                        base_conf = min(base_conf + 0.05, 0.50)
+
+                    steps: list[dict[str, object]] = [
+                        {
+                            "finding_id": _finding_id(sink),
+                            "primitive": sink_label,
+                            "evidence": str(
+                                sink.get("path_description", "static_reference")
+                            ),
+                        },
+                    ]
+                    if weakness_parts:
+                        steps.append({
+                            "finding_id": f"hardening_{binary}",
+                            "primitive": f"weak_hardening ({weakness_desc})",
+                            "evidence": f"Binary hardening: {hardening}",
+                        })
+
+                    static_chains.append({
+                        "id": f"chain_{chain_id:03d}",
+                        "description": (
+                            f"Sink+hardening chain in {binary}: "
+                            f"{sink_label} + {weakness_desc}"
+                        ),
+                        "binary": binary,
+                        "chain_type": "same_binary_sink_hardening",
+                        "steps": cast(
+                            list[JsonValue], cast(list[object], steps)
+                        ),
+                        "confidence": _clamp01(base_conf),
+                        "missing_evidence": cast(list[JsonValue], cast(list[object], [
+                            "Input source identification",
+                            "Dynamic data flow confirmation",
+                        ])),
+                        "method": "static_hardening",
+                    })
+
+        # --- Step 2: Cross-binary chains via IPC ---
+        cross_binary_chains: list[dict[str, JsonValue]] = []
+        if ipc_edges:
+            # Build adjacency from IPC edges
+            ipc_adj: dict[str, list[dict[str, object]]] = {}
+            for edge in ipc_edges:
+                src_node = str(edge.get("source", ""))
+                if src_node:
+                    ipc_adj.setdefault(src_node, []).append(edge)
+
+            # Check for shared symbols across binaries
+            shared_strings: dict[str, list[str]] = {}  # symbol -> [binaries]
+            for bbin in ba_binaries:
+                bin_name = str(bbin.get("binary", ""))
+                bsyms = bbin.get("symbols")
+                if isinstance(bsyms, list):
+                    for sym in cast(list[object], bsyms):
+                        if isinstance(sym, str) and len(sym) >= 3:
+                            shared_strings.setdefault(sym, []).append(bin_name)
+
+            # Find shared strings across 2+ binaries
+            cross_strings: dict[str, list[str]] = {
+                s: sorted(set(bins))
+                for s, bins in shared_strings.items()
+                if len(set(bins)) >= 2
+            }
+
+            # Build cross-binary chains from IPC-connected findings
+            for src_binary, edges in ipc_adj.items():
+                if chain_id >= _MAX_CHAINS:
+                    break
+                src_findings = findings_by_binary.get(src_binary, [])
+                for edge in edges:
+                    dst_binary = str(edge.get("target", ""))
+                    dst_findings = findings_by_binary.get(dst_binary, [])
+                    if src_findings and dst_findings:
+                        chain_id += 1
+                        ipc_type = str(edge.get("type", "ipc"))
+                        cross_binary_chains.append({
+                            "id": f"chain_{chain_id:03d}",
+                            "description": (
+                                f"Cross-binary chain: {src_binary} "
+                                f"--[{ipc_type}]--> {dst_binary}"
+                            ),
+                            "chain_type": "cross_binary",
+                            "ipc_type": ipc_type,
+                            "steps": cast(list[JsonValue], cast(list[object], [
+                                {
+                                    "finding_id": str(
+                                        src_findings[0].get("id", "src_finding")
+                                    ),
+                                    "primitive": "initial_access",
+                                    "evidence": f"finding in {src_binary}",
+                                },
+                                {
+                                    "finding_id": f"ipc_{ipc_type}",
+                                    "primitive": f"lateral_movement_via_{ipc_type}",
+                                    "evidence": (
+                                        f"IPC edge: {src_binary} -> {dst_binary}"
+                                    ),
+                                },
+                                {
+                                    "finding_id": str(
+                                        dst_findings[0].get("id", "dst_finding")
+                                    ),
+                                    "primitive": "code_execution",
+                                    "evidence": f"finding in {dst_binary}",
+                                },
+                            ])),
+                            "confidence": _clamp01(0.4),
+                            "missing_evidence": cast(list[JsonValue], cast(list[object], [
+                                "IPC message format verification",
+                                "Cross-process data flow confirmation",
+                                "Dynamic validation",
+                            ])),
+                            "method": "static_ipc",
+                        })
+                        if chain_id >= _MAX_CHAINS:
+                            break
+
+        all_chains = static_chains + cross_binary_chains
+
+        # Collect cross_strings for LLM prompt
+        cross_strings_for_prompt: dict[str, list[str]] = {}
+        if ipc_edges and 'cross_strings' in locals():
+            cross_strings_for_prompt = dict(
+                list(cross_strings.items())[:10]
+            )
+
+        # --- Step 3: LLM chain reasoning (opus) ---
+        llm_chains: list[dict[str, JsonValue]] = []
+        if not self.no_llm and findings:
+            driver = resolve_driver()
+            if driver.available():
+                findings_subset = findings[:20]
+                prompt = _build_chain_prompt(
+                    _truncate_json(findings_subset),
+                    _truncate_json(ipc_edges[:20]),
+                    _truncate_json(cross_strings_for_prompt),
+                )
+                result = driver.execute(
+                    prompt=prompt,
+                    run_dir=run_dir,
+                    timeout_s=_LLM_TIMEOUT_S,
+                    max_attempts=_LLM_MAX_ATTEMPTS,
+                    retryable_tokens=_RETRYABLE_TOKENS,
+                    model_tier="opus",
+                )
+                if result.status == "ok":
+                    parsed = _parse_json_response(result.stdout)
+                    if parsed is not None:
+                        chains_any = parsed.get("chains")
+                        if isinstance(chains_any, list):
+                            for ch in cast(list[object], chains_any):
+                                if isinstance(ch, dict):
+                                    ch_obj = cast(dict[str, object], ch)
+                                    ch_obj["method"] = "llm_opus"
+                                    llm_chains.append(
+                                        cast(dict[str, JsonValue], ch_obj)
+                                    )
+                    else:
+                        limitations.append(
+                            "LLM chain construction response could not be parsed"
+                        )
+                else:
+                    limitations.append(
+                        f"LLM chain construction call failed: {result.status}"
+                    )
+            else:
+                limitations.append(
+                    "LLM driver not available for chain reasoning"
+                )
+        elif self.no_llm:
+            limitations.append("LLM chain reasoning skipped (no_llm mode)")
+
+        all_chains.extend(llm_chains)
+
+        # Cap chains
+        if len(all_chains) > _MAX_CHAINS:
+            limitations.append(f"Chains capped at {_MAX_CHAINS}")
+            all_chains = all_chains[:_MAX_CHAINS]
+
+        status: StageStatus = "ok" if all_chains else "partial"
+        if not findings:
+            status = "partial"
+
+        payload: dict[str, JsonValue] = {
+            "schema_version": _SCHEMA_VERSION,
+            "status": status,
+            "chains": cast(
+                list[JsonValue], cast(list[object], all_chains)
+            ),
+            "summary": {
+                "total_chains": len(all_chains),
+                "same_binary": len(static_chains),
+                "cross_binary": len(cross_binary_chains),
+                "llm_generated": len(llm_chains),
+            },
+            "limitations": cast(
+                list[JsonValue], cast(list[object], sorted(set(limitations)))
+            ),
+        }
+        out_json.write_text(
+            json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        details: dict[str, JsonValue] = {
+            "total_chains": len(all_chains),
+            "same_binary": len(static_chains),
+            "cross_binary": len(cross_binary_chains),
+            "llm_generated": len(llm_chains),
+        }
+        return StageOutcome(
+            status=status,
+            details=details,
+            limitations=sorted(set(limitations)),
+        )

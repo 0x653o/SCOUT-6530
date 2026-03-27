@@ -2286,6 +2286,21 @@ def _apply_stage_result_to_report(
             "evidence": cast(list[JsonValue], cast(list[object], emu_evidence)),
             "details": details,
         }
+        return
+
+    # --- Generic catch-all for stages without a dedicated handler ---
+    # Ensures new stages (enhanced_source, semantic_classification,
+    # taint_propagation, fp_verification, adversarial_triage, chain_construction,
+    # poc_refinement, etc.) get their results stored in the report dict.
+    generic_evidence = normalize_evidence_list(
+        details.get("evidence"),
+        fallback=[{"path": f"stages/{stage}", "note": "evidence missing"}],
+    )
+    report[stage] = {
+        "status": stage_result.status,
+        "evidence": cast(list[JsonValue], cast(list[object], generic_evidence)),
+        "details": details,
+    }
 
 
 def _rerun_llm_synthesis_after_findings(
@@ -2536,6 +2551,41 @@ def analyze_run(
         cls = cast(type[Stage], getattr(mod, "OtaBootTriageStage"))
         return cls()
 
+    def _make_enhanced_source(no_llm: bool) -> Stage:
+        mod = importlib.import_module("aiedge.enhanced_source")
+        cls = cast(type[Stage], getattr(mod, "EnhancedSourceStage"))
+        return cls(no_llm=no_llm)
+
+    def _make_semantic_classifier(no_llm: bool) -> Stage:
+        mod = importlib.import_module("aiedge.semantic_classifier")
+        cls = cast(type[Stage], getattr(mod, "SemanticClassifierStage"))
+        return cls(no_llm=no_llm)
+
+    def _make_taint_propagation(no_llm: bool) -> Stage:
+        mod = importlib.import_module("aiedge.taint_propagation")
+        cls = cast(type[Stage], getattr(mod, "TaintPropagationStage"))
+        return cls(no_llm=no_llm)
+
+    def _make_fp_verification(no_llm: bool) -> Stage:
+        mod = importlib.import_module("aiedge.fp_verification")
+        cls = cast(type[Stage], getattr(mod, "FPVerificationStage"))
+        return cls(no_llm=no_llm)
+
+    def _make_adversarial_triage(no_llm: bool) -> Stage:
+        mod = importlib.import_module("aiedge.adversarial_triage")
+        cls = cast(type[Stage], getattr(mod, "AdversarialTriageStage"))
+        return cls(no_llm=no_llm)
+
+    def _make_poc_refinement(no_llm: bool) -> Stage:
+        mod = importlib.import_module("aiedge.poc_refinement")
+        cls = cast(type[Stage], getattr(mod, "PoCRefinementStage"))
+        return cls(no_llm=no_llm)
+
+    def _make_chain_constructor(no_llm: bool) -> Stage:
+        mod = importlib.import_module("aiedge.chain_constructor")
+        cls = cast(type[Stage], getattr(mod, "ChainConstructorStage"))
+        return cls(no_llm=no_llm)
+
     extraction_default_timeout_s = 600
     extraction_timeout_s: int | None
     budget_limits: list[str] = []
@@ -2603,16 +2653,30 @@ def analyze_run(
                 max_total_matches=scan_max_matches,
             ),
             SurfacesStage(),
+            _make_enhanced_source(no_llm),
+            _make_semantic_classifier(no_llm),
             GraphStage(),
             AttackSurfaceStage(),
             FunctionalSpecStage(),
             ThreatModelStage(),
             AttributionStage(),
             LLMSynthesisStage(no_llm=no_llm),
+            _make_taint_propagation(no_llm),
+            _make_fp_verification(no_llm),
+            _make_adversarial_triage(no_llm),
             make_emulation_stage(),
         ]
         inv_rep = run_stages(early_stages, ctx)
         _write_stage_manifests(ctx=ctx, stages=early_stages, report=inv_rep)
+
+        # Apply results for v2.0 stages that lack dedicated handlers
+        _v2_stage_names = {
+            "enhanced_source", "semantic_classification", "taint_propagation",
+            "fp_verification", "adversarial_triage",
+        }
+        for _sr in inv_rep.stage_results:
+            if _sr.stage in _v2_stage_names:
+                _apply_stage_result_to_report(report, _sr, budget_s=budget_s)
 
         ota_res = next((r for r in inv_rep.stage_results if r.stage == "ota"), None)
         if ota_res is not None:
@@ -3458,6 +3522,8 @@ def analyze_run(
         stages.append(DynamicValidationStage())
     if manifest_profile == "exploit" and _make_fuzz_campaign_stage is not None:
         stages.append(_make_fuzz_campaign_stage(info, source_input_path, remaining_s, no_llm))
+    stages.append(_make_poc_refinement(no_llm))
+    stages.append(_make_chain_constructor(no_llm))
     if ExploitGateStage is not None:
         stages.append(ExploitGateStage())
     if ExploitChainStage is not None:
